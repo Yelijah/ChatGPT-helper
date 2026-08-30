@@ -45,6 +45,11 @@
   }
 
   function normalizeTitle(rawText) {
+    const sharedNormalizer = global[NAMESPACE]?.conversationApi?.normalizeQuestionTitle;
+    if (typeof sharedNormalizer === "function") {
+      return sharedNormalizer(rawText);
+    }
+
     const firstLine = (rawText || "")
       .split("\n")
       .map((line) => line.trim())
@@ -61,6 +66,20 @@
       .slice(0, 120) || "未命名问题";
   }
 
+  function normalizeFullText(rawText) {
+    const sharedNormalizer = global[NAMESPACE]?.conversationApi?.normalizeMessageText;
+    if (typeof sharedNormalizer === "function") {
+      return sharedNormalizer(rawText);
+    }
+
+    return String(rawText || "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+
   function findTurnContainer(node) {
     if (!(node instanceof HTMLElement)) {
       return null;
@@ -71,6 +90,18 @@
       node.closest("[data-testid^='conversation-turn-']") ||
       node.closest("[data-message-id]") ||
       node
+    );
+  }
+
+  function getSourceMessageId(element) {
+    if (!(element instanceof HTMLElement)) {
+      return null;
+    }
+
+    return (
+      element.getAttribute("data-message-id") ||
+      element.querySelector("[data-message-id]")?.getAttribute("data-message-id") ||
+      null
     );
   }
 
@@ -335,21 +366,75 @@
 
     return candidates
       .map((element, index) => {
-        const id = `${ITEM_ID_PREFIX}-${index + 1}`;
+        const messageId = getSourceMessageId(element);
+        const id = messageId
+          ? `question-${messageId}`
+          : `${ITEM_ID_PREFIX}-pending-${index + 1}`;
+        const fullText = normalizeFullText(extractQuestionText(element));
         element.dataset.chatgptHelperQuestionId = id;
 
         return {
           id,
-          title: normalizeTitle(extractQuestionText(element)),
+          messageId,
+          nodeId: null,
+          title: normalizeTitle(fullText),
+          fullText,
+          branchIndex: null,
           element,
-          index
+          index,
+          source: "dom"
         };
       })
       .filter((item) => item.title);
   }
 
-  function getQuestionItems() {
+  function getDomQuestionItems() {
     return buildQuestionItems();
+  }
+
+  function getQuestionItems() {
+    return getDomQuestionItems();
+  }
+
+  function findMessageElement(messageId) {
+    if (!messageId) {
+      return null;
+    }
+
+    const matched = document.querySelector(
+      `[data-message-id='${CSS.escape(String(messageId))}']`
+    );
+    return matched instanceof HTMLElement ? findTurnContainer(matched) : null;
+  }
+
+  function getRenderedMessageEntries() {
+    const seen = new Set();
+    const entries = [];
+
+    document.querySelectorAll("[data-message-id]").forEach((node) => {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+
+      if (node.closest(".chatgpt-helper-sidebar, .chatgpt-helper-message-outline")) {
+        return;
+      }
+
+      const messageId = node.getAttribute("data-message-id");
+      if (!messageId || seen.has(messageId)) {
+        return;
+      }
+
+      const element = findTurnContainer(node);
+      if (!element) {
+        return;
+      }
+
+      seen.add(messageId);
+      entries.push({ messageId, element });
+    });
+
+    return entries;
   }
 
   // 为 AI 回复生成可复用的大纲消息 ID。
@@ -481,6 +566,102 @@
     return fallback instanceof HTMLElement ? fallback : null;
   }
 
+  function getScrollMetrics() {
+    const container = getScrollContainer();
+    if (!container) {
+      return { top: 0, maxTop: 0, clientHeight: 0 };
+    }
+
+    return {
+      top: Number(container.scrollTop) || 0,
+      maxTop: Math.max(container.scrollHeight - container.clientHeight, 0),
+      clientHeight: Number(container.clientHeight) || 0
+    };
+  }
+
+  function scrollByAmount(delta) {
+    const container = getScrollContainer();
+    if (!container) {
+      return false;
+    }
+
+    const metrics = getScrollMetrics();
+    const nextTop = Math.min(
+      Math.max(metrics.top + (Number(delta) || 0), 0),
+      metrics.maxTop
+    );
+    container.scrollTo({ top: nextTop, behavior: "auto" });
+    return true;
+  }
+
+  function scrollToRatio(ratio) {
+    const container = getScrollContainer();
+    if (!container) {
+      return false;
+    }
+
+    const safeRatio = Math.min(Math.max(Number(ratio) || 0, 0), 1);
+    container.scrollTo({
+      top: getScrollMetrics().maxTop * safeRatio,
+      behavior: "auto"
+    });
+    return true;
+  }
+
+  function waitForMessageRender(options = {}) {
+    const root = getConversationRoot() || document.body;
+    const signal = options.signal;
+    const timeoutMs = Math.max(Number(options.timeoutMs) || 250, 0);
+
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("消息定位已取消", "AbortError")
+        );
+        return;
+      }
+
+      let settled = false;
+      let timeoutId = 0;
+      const observer = new MutationObserver(() => finish("mutation"));
+      const onAbort = () => {
+        finish(
+          "abort",
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("消息定位已取消", "AbortError")
+        );
+      };
+
+      function cleanup() {
+        observer.disconnect();
+        if (timeoutId) {
+          global.clearTimeout(timeoutId);
+        }
+        signal?.removeEventListener("abort", onAbort);
+      }
+
+      function finish(reason, error) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        if (error) {
+          reject(error);
+        } else {
+          resolve(reason);
+        }
+      }
+
+      observer.observe(root, { childList: true, subtree: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timeoutId = global.setTimeout(() => finish("timeout"), timeoutMs);
+    });
+  }
+
   function scrollElementWithOffset(target, options = {}) {
     if (!(target instanceof HTMLElement)) {
       return false;
@@ -586,6 +767,16 @@
 
     const scrolled = scrollElementWithOffset(target, { behavior: "auto" });
     correctScrollUntilSettled(target, { delay: 0 });
+    return scrolled;
+  }
+
+  function scrollToMessageElement(element) {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+
+    const scrolled = scrollElementWithOffset(element, { behavior: "auto" });
+    correctScrollUntilSettled(element, { delay: 0 });
     return scrolled;
   }
 
@@ -704,13 +895,21 @@
   global[NAMESPACE] = global[NAMESPACE] || {};
   global[NAMESPACE].domAdapter = {
     extractHeadings,
+    findMessageElement,
     getAssistantMessages,
+    getDomQuestionItems,
     getQuestionItems,
+    getRenderedMessageEntries,
     getScrollContainer,
+    getScrollMetrics,
     observeAssistantMessages,
     observeQuestions,
+    scrollByAmount,
+    scrollToMessageElement,
     scrollToHeading,
     scrollToQuestion,
+    scrollToRatio,
+    waitForMessageRender,
     isConversationRoute
   };
 })(globalThis);

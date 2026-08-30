@@ -1,119 +1,119 @@
-# API-Backed Complete Question Directory Design
+# 基于接口的完整问题目录设计
 
-## Summary
+## 摘要
 
-Replace the right-side question directory's DOM-only data source with the current ChatGPT conversation response. The directory continues to show only user messages, follows only the branch selected by the page, and keeps the existing visual interaction. DOM discovery remains available as a fallback and as a temporary source for newly submitted messages that the conversation response does not yet contain.
+将右侧问题目录的数据源从“仅扫描当前 DOM”改为“读取 ChatGPT 当前会话响应”。目录仍然只显示用户消息，只沿页面当前选中的会话分支生成，并保留现有视觉与交互方式。DOM 扫描继续作为降级数据源，同时临时补充已经发送、但会话接口尚未返回的新消息。
 
-Clicking a directory item must also work when its message is not currently rendered. The extension will drive ChatGPT's scroll container until the host page renders the target message, then reuse the existing offset-corrected scroll behavior for final positioning.
+当用户点击尚未渲染到 DOM 的目录项时，扩展需要自动驱动 ChatGPT 的滚动容器，直到宿主页面渲染目标消息，再复用现有的偏移修正逻辑完成精确定位。
 
-## Goals
+## 目标
 
-- Show every non-empty user message on the currently selected conversation branch.
-- Exclude assistant, system, tool, hidden alternate-branch, and empty user messages.
-- Keep the directory usable while a new user message is still being persisted.
-- Automatically load and locate a selected message that is outside the currently rendered DOM window.
-- Preserve the current sidebar presentation and active-item behavior.
-- Fall back to the current DOM-derived directory when the internal conversation request fails.
-- Keep conversation content and authentication material in memory only.
+- 展示当前所选会话分支中的全部非空用户消息。
+- 排除 AI、系统、工具、非活动分支及空用户消息。
+- 新用户消息仍在持久化时，目录仍可立即使用。
+- 自动加载并定位当前 DOM 窗口外的目标消息。
+- 保持现有侧栏外观和活动项高亮行为。
+- 内部会话请求失败时，退回现有的 DOM 问题目录。
+- 会话内容和认证信息只保存在内存中。
 
-## Non-Goals
+## 不在范围内
 
-- Showing assistant replies in the right-side directory.
-- Showing messages from inactive branches.
-- Replacing the left-side AI response heading outline.
-- Persisting or exporting conversations.
-- Calling any third-party service.
-- Mutating ChatGPT's private application state or rendering API response content into ChatGPT's message area.
-- Providing a stable public API integration; the conversation endpoint is an internal site dependency.
+- 在右侧目录中展示 AI 回复。
+- 展示非活动分支中的消息。
+- 替换左侧 AI 回复标题大纲。
+- 持久化或导出会话。
+- 请求任何第三方服务。
+- 修改 ChatGPT 私有应用状态，或把接口响应中的消息渲染进 ChatGPT 消息区域。
+- 提供稳定的公开 API 集成；会话接口属于站点内部依赖。
 
-## Current Behavior
+## 当前行为
 
-`dom-adapter.js` scans the page's `main` element for user-message selectors, falls back to article and section heuristics, extracts the first meaningful text line, and assigns sequential question IDs. `index.js` treats the resulting elements as both the directory data source and scroll targets. This means a question cannot appear in the directory unless ChatGPT has rendered its message element.
+`dom-adapter.js` 在页面的 `main` 元素内扫描用户消息选择器；未匹配时使用 `article`、`section` 等启发式规则；然后提取第一行有效文本并分配顺序问题 ID。`index.js` 同时把这些元素作为目录数据和滚动目标。因此，ChatGPT 尚未渲染的消息无法出现在目录中。
 
-The left-side message outline is independent. It selects the most visible assistant response and extracts its `h1` through `h6` elements; that flow remains unchanged except for shared route lifecycle handling.
+左侧消息大纲是独立功能。它选择当前视口中可见面积最大的 AI 回复，并提取其中的 `h1` 至 `h6` 元素。除共享的路由生命周期外，本次改造不改变这条流程。
 
-## Selected Approach
+## 选定方案
 
-Use a same-origin conversation request as the canonical directory source and bind response messages to rendered DOM elements by message ID. Keep the existing DOM scan as a degraded source. Do not intercept ChatGPT's `fetch`, inject a main-world bridge, or add a background service worker. If the same-origin request is proven impossible during implementation, stop and revise this design with the user instead of silently expanding the integration surface.
+使用同源会话请求作为目录的权威数据源，通过消息 ID 将接口消息绑定到已渲染的 DOM 元素，并保留现有 DOM 扫描作为降级来源。不拦截 ChatGPT 的 `fetch`，不注入主执行环境桥接脚本，也不增加后台 Service Worker。如果实现过程中证明同源请求不可行，应停止实现并与用户重新修订设计，而不是擅自扩大集成范围。
 
-The internal endpoint dependency is isolated behind one module so a future endpoint or response-shape change does not affect sidebar rendering or navigation.
+内部接口依赖集中封装在一个模块内，使未来接口路径或响应结构变化不会牵连侧栏渲染与消息定位模块。
 
-## Components
+## 组件设计
 
 ### `src/content/conversation-api.js`
 
-Owns conversation identity, authentication, request execution, response validation, branch reconstruction, and user-question projection.
+负责会话标识、认证、请求执行、响应校验、活动分支重建和用户问题映射。
 
-It exposes a namespace API with these responsibilities:
+通过全局命名空间提供以下能力：
 
-- Extract a conversation ID from ordinary and project conversation routes.
-- Request `/backend-api/conversation/{conversationId}` with same-origin credentials.
-- On an authentication failure, request `/api/auth/session`, retain any returned access token in local function scope only, and retry the conversation request once with an `Authorization: Bearer` header.
-- Accept an `AbortSignal` and stop work immediately when the route changes or a newer refresh supersedes it.
-- Validate that the response has a `mapping` object and a string `current_node` referencing a mapping entry.
-- Follow each node's `parent` from `current_node` to the root, detect cycles, and reverse the result into chronological branch order.
-- Preserve every branch node in an internal ordered representation so navigation can compare user targets with rendered assistant or system-message anchors.
-- Project only non-empty `author.role === "user"` messages into question items.
+- 从普通会话及项目会话路由中提取会话 ID。
+- 使用同源凭据请求 `/backend-api/conversation/{conversationId}`。
+- 遇到认证失败时，请求 `/api/auth/session`；如果返回访问令牌，只在当前函数作用域内临时保存，并携带 `Authorization: Bearer` 请求头重试会话请求一次。
+- 接收 `AbortSignal`，当路由变化或更新请求被取代时立即停止。
+- 校验响应是否包含 `mapping` 对象，以及指向有效映射节点的字符串 `current_node`。
+- 从 `current_node` 开始沿每个节点的 `parent` 回溯到根节点，检测循环后反转为按时间排序的活动分支。
+- 在内部有序分支中保留全部节点，使定位模块可以利用已渲染的 AI 或系统消息作为位置锚点。
+- 只将非空且 `author.role === "user"` 的消息映射为问题目录项。
 
 ### `src/content/message-navigator.js`
 
-Owns cancellable navigation to rendered and unrendered messages.
+负责以可取消方式定位已渲染和未渲染的消息。
 
-It receives an ordered active branch, a target message ID, the scroll container, and DOM adapter callbacks. It never parses API responses or renders sidebar UI.
+该模块接收有序活动分支、目标消息 ID、滚动容器及 DOM 适配器回调。它不解析接口响应，也不渲染侧栏 UI。
 
 ### `src/content/dom-adapter.js`
 
-Retains ChatGPT DOM knowledge and scrolling primitives. Its complete-directory builder is replaced by narrower operations:
+继续封装 ChatGPT DOM 知识和滚动基础能力。原有“构建完整目录”职责拆分为以下较窄接口：
 
-- Scan currently rendered user messages for degraded mode and pending-message merging.
-- Find a rendered turn by response message ID.
-- Collect rendered branch message IDs and their elements.
-- Observe message rendering changes during navigation.
-- Scroll the host container by an explicit amount or position.
-- Perform final target scrolling and delayed offset correction.
+- 扫描当前已渲染的用户消息，用于降级模式和待同步消息合并。
+- 根据接口消息 ID 查找已渲染的会话轮次。
+- 收集已渲染的活动分支消息 ID 及对应元素。
+- 在定位期间监听消息渲染变化。
+- 按指定距离或位置滚动宿主容器。
+- 执行最终目标滚动和延迟偏移修正。
 
-Generated extension elements remain excluded from all scans.
+所有扫描仍需排除扩展自身生成的元素。
 
 ### `src/content/index.js`
 
-Owns application state and orchestration:
+负责应用状态和整体编排：
 
-- Route lifecycle and request cancellation.
-- API refresh scheduling and stale-response rejection.
-- In-memory cache for the active conversation.
-- Merge of canonical API questions with newly rendered DOM-only questions.
-- Sidebar status and active-item state.
-- Navigation lifecycle and cancellation.
-- Existing assistant-outline refresh behavior.
+- 管理路由生命周期和请求取消。
+- 调度接口刷新并拒绝过期响应。
+- 保存当前会话的内存缓存。
+- 合并权威接口问题与 DOM 中新出现、尚未同步的问题。
+- 管理侧栏状态和活动项。
+- 管理消息定位生命周期和取消。
+- 保持现有 AI 回复大纲刷新行为。
 
 ### `src/content/sidebar.js`
 
-Continues rendering the right-side rail and expanded list. Directory items no longer require an `element`. It accepts a small status model for loading, degraded sync, and navigation progress.
+继续渲染右侧刻度条和展开列表。目录项不再强制要求存在 `element`，并接收一组简单状态，用于显示加载、降级同步和定位进度。
 
 ### `manifest.json`
 
-Loads `conversation-api.js` and `message-navigator.js` before `index.js`. No background worker, persistent storage permission, or third-party host permission is added.
+在 `index.js` 之前加载 `conversation-api.js` 和 `message-navigator.js`。不新增后台脚本、持久化存储权限或第三方主机权限。
 
-## Route and Request Flow
+## 路由与请求流程
 
-1. `index.js` detects a supported conversation route.
-2. It derives the conversation ID and increments a request-generation counter.
-3. It aborts any prior conversation request or target navigation.
-4. It renders available DOM questions immediately so the existing directory does not disappear while loading.
-5. It requests the conversation response.
-6. It ignores the result if its generation is no longer current.
-7. It reconstructs the selected branch from the response's `current_node` parent chain.
-8. It projects branch user messages into canonical directory items.
-9. It merges rendered DOM-only user messages that are not yet represented by a canonical message ID.
-10. It renders the result and binds any currently available target elements.
+1. `index.js` 检测当前是否为支持的会话路由。
+2. 提取会话 ID，并递增请求代次编号。
+3. 取消上一会话请求或正在进行的目标定位。
+4. 立即渲染现有 DOM 问题，避免加载接口时目录消失。
+5. 请求会话响应。
+6. 如果响应所属代次已不是当前代次，则丢弃结果。
+7. 从响应的 `current_node` 父链重建当前所选分支。
+8. 将分支中的用户消息映射为权威目录项。
+9. 合并当前 DOM 中存在、但权威消息 ID 集合尚未包含的用户消息。
+10. 渲染最终结果，并绑定当前已存在的目标元素。
 
-The same flow runs after route changes, branch changes, edits, and newly submitted user messages. Mutation-driven refreshes are debounced by 500 milliseconds and coalesced so streaming assistant output does not produce a request storm.
+路由切换、分支切换、编辑消息和提交新用户消息后，都执行同一更新流程。由 DOM 变化触发的刷新采用 500 毫秒防抖并合并重复请求，避免 AI 流式输出造成请求风暴。
 
-## Active-Branch Reconstruction
+## 当前分支重建
 
-Starting at `current_node`, the parser repeatedly reads `mapping[nodeId]` and follows `node.parent` until the parent is null. It records visited node IDs and rejects a cycle or missing referenced node as an invalid response. The collected nodes are reversed to chronological order.
+解析器从 `current_node` 开始，读取 `mapping[nodeId]` 并持续访问 `node.parent`，直到父节点为 `null`。遍历过程中记录已访问节点 ID；若出现循环或引用不存在的节点，则将响应判为无效。最终反转节点集合，得到按时间排列的活动分支。
 
-Each internal branch entry contains:
+每个内部活动分支项包含：
 
 ```js
 {
@@ -125,7 +125,7 @@ Each internal branch entry contains:
 }
 ```
 
-The user-facing question projection contains:
+面向侧栏的问题项包含：
 
 ```js
 {
@@ -139,146 +139,146 @@ The user-facing question projection contains:
 }
 ```
 
-Messages without a stable message ID use their mapping node ID as the stable key. Alternate children are never traversed, so inactive branches cannot enter the directory.
+消息缺少稳定消息 ID 时，使用映射节点 ID 作为稳定键。解析过程不遍历其他子节点，因此非活动分支不会进入目录。
 
-## Question Text Extraction
+## 问题文本提取
 
-The parser reads textual content from the message's content parts in source order. String parts are included directly. Structured parts are included only when they expose an explicit textual value; image, audio, file, tool, and metadata parts are ignored.
+解析器按原始顺序读取消息内容中的文本部分。字符串内容直接采用；结构化内容只有在提供明确文本值时才纳入。图片、音频、文件、工具内容和元数据均忽略。
 
-The resulting text is trimmed and split into lines. Empty lines and standalone speaker labels are removed. The first meaningful line is whitespace-normalized and truncated to 120 Unicode code points. A user message with no meaningful text is excluded.
+组合结果经过首尾去空白和按行拆分，过滤空行及单独出现的说话者标签。第一行有效文本会压缩连续空白，并截断为最多 120 个 Unicode 码点。没有有效文本的用户消息不进入目录。
 
-The existing DOM title extraction follows the same normalization rules so canonical and pending items do not visibly change title when synchronized.
+现有 DOM 标题提取也采用同一套规范化规则，使待同步目录项转为权威目录项时标题不会发生可见变化。
 
-## Canonical and Pending-Message Merge
+## 权威数据与待同步消息合并
 
-API questions are authoritative and retain branch order. Rendered DOM questions are matched to them by `data-message-id` first. A DOM question without a known message ID is matched only when its normalized full text equals one unmatched API question near the end of the branch; otherwise it is treated as a pending local item.
+接口问题为权威数据，并保持活动分支顺序。已渲染 DOM 问题优先通过 `data-message-id` 与接口问题匹配。DOM 问题没有已知消息 ID 时，只在其规范化全文等于活动分支末尾附近某个尚未匹配的接口问题时进行文本匹配；否则将其视为本地待同步项。
 
-Pending items are appended in DOM order and use a DOM-scoped temporary ID. On the next successful response, a matching canonical message replaces the pending item instead of producing a duplicate. A route change discards all pending items from the previous conversation.
+待同步项按 DOM 顺序追加，并使用仅在当前 DOM 生命周期内有效的临时 ID。下一次请求成功后，匹配的权威消息会替换待同步项，而不是形成重复项。路由切换时，清除上一会话的全部待同步项。
 
-## Navigation Algorithm
+## 消息定位算法
 
-Only one navigation operation can run at a time. Starting a new one aborts the previous operation.
+同一时间只允许存在一个定位操作。启动新定位时立即取消旧定位。
 
-### Direct target
+### 目标已经渲染
 
-If the target's message ID is already represented by a rendered turn element, navigation uses the existing offset-aware scroll operation and delayed correction. The sidebar holds the selected item active until positioning settles or the navigation deadline expires.
+如果目标消息 ID 已经对应一个已渲染的会话轮次，定位模块复用现有的偏移滚动与延迟修正逻辑。侧栏在位置稳定或定位期限到达之前持续锁定目标活动项。
 
-### Unrendered target
+### 目标尚未渲染
 
-If no target element exists:
+目标元素不存在时：
 
-1. Map all currently rendered message IDs to their active-branch indices.
-2. Select the rendered anchor with the smallest absolute branch-index distance from the target.
-3. If the target precedes the anchor, scroll upward by 80 percent of the visible container height. If it follows the anchor, scroll downward by the same amount.
-4. If there is no recognized rendered anchor, estimate a scroll position from `target.branchIndex / (branch.length - 1)` and the container's available scroll range.
-5. Wait for either a relevant DOM mutation, a scroll-settle frame, or 250 milliseconds, then rescan rendered IDs.
-6. Repeat until the target appears, the user cancels, the route changes, a scroll boundary remains unchanged for three attempts, or ten seconds elapse.
-7. When the target appears, perform direct target positioning and delayed offset correction.
+1. 将当前 DOM 中已渲染的消息 ID 映射到活动分支索引。
+2. 选择与目标分支索引距离最小的已渲染锚点。
+3. 目标位于锚点之前时，向上滚动可视容器高度的 80%；目标位于锚点之后时，向下滚动相同距离。
+4. 没有可识别锚点时，根据 `target.branchIndex / (branch.length - 1)` 和容器可滚动范围估算首次滚动位置。
+5. 等待相关 DOM 变化、滚动稳定帧或 250 毫秒，然后重新扫描消息 ID。
+6. 重复上述过程，直到目标出现、用户取消、路由变化、滚动边界连续三次不再变化，或者总时长达到 10 秒。
+7. 目标出现后，执行直接定位及延迟偏移修正。
 
-Scrolling to a boundary intentionally gives ChatGPT's own lazy-loading behavior time to fetch and render older history. The extension does not inject response messages into ChatGPT's private UI tree.
+滚动到边界后会主动等待，让 ChatGPT 自身的历史消息懒加载有机会完成。扩展不会把接口消息注入 ChatGPT 的私有 UI 树。
 
-### Navigation limits
+### 定位能力边界
 
-An independently fetched conversation response does not guarantee that ChatGPT will accept or render every message. If the host stops supporting scroll-triggered history rendering, the directory can remain complete while navigation fails. After the bounded ten-second attempt, the sidebar reports that ChatGPT did not load the selected message and leaves the directory usable.
+扩展独立取得完整会话响应，并不代表 ChatGPT 前端一定会接受或渲染其中的每条消息。如果宿主页面未来不再支持滚动触发历史消息渲染，目录仍可完整展示，但无法安全地强制页面定位。达到 10 秒上限后，侧栏提示 ChatGPT 未能加载目标消息并结束自动滚动，其他目录功能继续可用。
 
-## Active Question Tracking
+## 活动问题跟踪
 
-Rendered API questions continue using element geometry relative to the existing 160-pixel threshold. When the closest rendered element is an assistant or system entry, the active user question is the nearest preceding user entry on the active branch. Unrendered questions are never selected merely because of their estimated position.
+已渲染的接口问题继续根据元素位置与现有 160 像素阈值计算活动项。当距离阈值最近的已渲染元素是 AI 或系统消息时，选择活动分支中位于它之前且最近的用户消息。未渲染的问题不会仅凭估算位置成为活动项。
 
-During programmatic navigation, the target remains locked as active. The lock is released when final positioning settles, the deadline expires, the route changes, a different item is selected, or the user makes a scroll movement substantially different from the extension's requested movement.
+程序化定位期间持续锁定目标项。最终位置稳定、期限到达、路由变化、用户选择其他目录项，或用户产生与扩展预期滚动明显不同的手动滚动时，释放锁定。
 
-## Refresh and Cache Policy
+## 刷新与缓存策略
 
-- Initial supported route: immediate request.
-- Route change: abort, clear route-local pending state, and request immediately.
-- User submission, edit, or branch-selection mutation: immediate DOM merge followed by a 500-millisecond debounced request.
-- Authentication retry: one retry per refresh operation.
-- Successful response: retained only in the active page's memory, keyed by conversation ID.
-- Cached data can be rendered immediately when returning to a conversation, but a background refresh still runs.
-- No conversation response or token is written to extension storage, Web Storage, IndexedDB, logs, or DOM attributes.
+- 首次进入支持的路由：立即请求。
+- 路由变化：取消旧操作、清理路由级待同步状态并立即请求。
+- 用户发送、编辑或选择分支：立即合并 DOM 数据，并在 500 毫秒防抖后请求。
+- 认证重试：每次刷新操作最多重试一次。
+- 成功响应：只在当前页面内存中按会话 ID 缓存。
+- 再次进入已缓存会话时，可以立即显示缓存，但仍需后台刷新。
+- 会话响应或访问令牌不写入扩展存储、Web Storage、IndexedDB、日志或 DOM 属性。
 
-## Error Handling
+## 错误处理
 
-- `401` or `403`: refresh session authentication once and retry once.
-- `404`: treat the route as unavailable through the conversation endpoint and use DOM degraded mode.
-- Network failure or timeout: keep the last successful canonical directory when available, merge current DOM questions, and mark sync as degraded.
-- Invalid JSON, missing `mapping`, invalid `current_node`, broken parent reference, or cycle: reject the response without partially replacing canonical state.
-- Stale request generation: silently discard the result.
-- Navigation timeout or fixed scroll boundary: stop scrolling and show a non-blocking failure state.
+- `401` 或 `403`：刷新当前站点认证并重试一次。
+- `404`：认为当前路由无法通过会话接口读取，进入 DOM 降级模式。
+- 网络失败或超时：若存在上次成功数据，则保留权威目录并合并当前 DOM 问题，同时标记为降级同步。
+- JSON 无效、缺少 `mapping`、`current_node` 无效、父节点引用断裂或出现循环：拒绝整个响应，不使用部分数据覆盖权威状态。
+- 请求代次过期：静默丢弃结果。
+- 定位超时或滚动边界固定：停止自动滚动并显示非阻断式失败状态。
 
-Errors never remove a usable existing directory and never interrupt ChatGPT's normal input or response flow.
+任何错误都不得移除当前仍可用的目录，也不得干扰 ChatGPT 正常输入和回答流程。
 
-## Sidebar States
+## 侧栏状态
 
-The sidebar supports these non-blocking states:
+侧栏支持以下非阻断式状态：
 
-- `loading`: initial canonical synchronization is in progress.
-- `ready`: canonical active-branch data is current.
-- `degraded`: DOM or stale canonical data is being shown because synchronization failed.
-- `navigating`: an unrendered target is being loaded and located.
-- `navigation-error`: the selected target could not be rendered within the bounded attempt.
+- `loading`：正在进行首次权威数据同步。
+- `ready`：当前活动分支的权威数据已更新。
+- `degraded`：同步失败，当前显示 DOM 数据或旧的权威数据。
+- `navigating`：正在加载并定位未渲染目标。
+- `navigation-error`：在限定次数和时间内未能渲染所选目标。
 
-The collapsed rail remains usable in every state. Status text appears only in the expanded card and does not use modal dialogs or page-level notifications.
+所有状态下，折叠刻度条都保持可用。状态文本只显示在展开卡片内，不使用模态对话框或页面级通知。
 
-## Security and Privacy
+## 安全与隐私
 
-- Requests are restricted to relative `chatgpt.com` endpoints.
-- No third-party host permission or network destination is introduced.
-- Access tokens are never persisted, attached to DOM nodes, included in thrown error messages, or logged.
-- Full response bodies and full message text are not logged.
-- Only normalized titles needed by the sidebar remain in application state after projection; raw response ownership remains scoped to parsing and the active branch model needed for navigation.
-- DOM insertion continues to use `textContent`, not HTML interpretation.
+- 请求只允许访问 `chatgpt.com` 的相对路径。
+- 不新增第三方主机权限或网络目标。
+- 访问令牌不得持久化、写入 DOM 节点、包含在异常文本中或输出到日志。
+- 不记录完整响应体或完整消息正文。
+- 映射完成后，应用状态只保留侧栏需要的规范化标题，以及定位所需的活动分支模型；原始响应的所有权限制在解析过程内。
+- DOM 插入继续使用 `textContent`，不解析 HTML。
 
-## Testing Strategy
+## 测试策略
 
-Add a development-only test setup using Node's built-in test runner. A DOM simulation library may be installed as a development dependency; runtime extension code remains dependency-free and is still loaded directly by Chrome.
+新增仅用于开发的 Node 内置测试运行配置。可以安装 DOM 模拟库作为开发依赖；Chrome 运行时代码仍保持零依赖，并继续由浏览器直接加载。
 
-Pure parser tests cover:
+纯解析器测试覆盖：
 
-- Normal parent-chain reconstruction and chronological reversal.
-- Exclusion of inactive branch children.
-- Exclusion of assistant, system, tool, and empty user messages.
-- Text and mixed-media content extraction.
-- Missing nodes, invalid `current_node`, and parent cycles.
-- Stable key fallback when a message ID is absent.
-- Ordinary and project conversation route parsing.
+- 正常父链重建和时间顺序反转。
+- 排除非活动分支子节点。
+- 排除 AI、系统、工具及空用户消息。
+- 文本与混合媒体内容提取。
+- 节点缺失、`current_node` 无效和父链循环。
+- 消息 ID 缺失时使用稳定后备键。
+- 普通会话和项目会话路由解析。
 
-Request lifecycle tests cover:
+请求生命周期测试覆盖：
 
-- Credentialed same-origin request.
-- One authentication refresh and retry on `401` or `403`.
-- Abort propagation.
-- Timeout behavior.
-- Stale response rejection.
+- 携带同源凭据的请求。
+- `401` 或 `403` 后只刷新认证并重试一次。
+- 取消信号传递。
+- 超时处理。
+- 过期响应拒绝。
 
-Merge tests cover:
+合并测试覆盖：
 
-- Message-ID binding.
-- Pending DOM append.
-- Canonical replacement of a pending item.
-- Duplicate-title messages remaining distinct.
-- Pending-state reset on route change.
+- 通过消息 ID 绑定。
+- 追加待同步 DOM 消息。
+- 权威消息替换待同步项。
+- 标题相同的不同消息保持独立。
+- 路由切换时清除待同步状态。
 
-Navigation tests cover:
+定位测试覆盖：
 
-- Direct rendered-target positioning.
-- Upward and downward virtualized loading.
-- Proportional first positioning without a rendered anchor.
-- Successful rescan after a DOM mutation.
-- Cancellation by a new selection or route change.
-- Scroll-boundary and ten-second termination.
-- Final offset correction after delayed layout changes.
+- 直接定位已渲染目标。
+- 向上和向下加载虚拟化消息。
+- 没有已渲染锚点时按比例首次定位。
+- DOM 变化后重新扫描并成功定位。
+- 新选择或路由变化取消定位。
+- 滚动边界和 10 秒期限结束定位。
+- 延迟布局变化后的最终偏移修正。
 
-Manual Chrome verification covers ordinary conversations, project conversations, edited branches, branch switching, newly submitted messages, long virtualized histories, narrow viewports, and API-failure degraded mode.
+Chrome 手动验证覆盖普通会话、项目会话、编辑分支、分支切换、新发送消息、超长虚拟化历史、窄屏以及接口失败降级模式。
 
-## Acceptance Criteria
+## 验收标准
 
-- The right directory shows all non-empty user messages on the response's current-node parent chain and no messages from inactive branches.
-- A newly submitted user message appears without waiting for the canonical refresh and does not duplicate after synchronization.
-- Clicking a rendered question retains the current accurate jump behavior.
-- Clicking an unrendered question automatically drives loading and positions the target when ChatGPT exposes it through scrolling.
-- Failed synchronization leaves a functional DOM-derived directory.
-- Failed navigation terminates within ten seconds and does not leave automatic scrolling active.
-- Switching routes or branches cannot display stale questions from the previous state.
-- The left-side assistant heading outline retains its current behavior.
-- No conversation content or authentication token is persisted or sent outside `chatgpt.com`.
+- 右侧目录展示接口响应 `current_node` 父链上的全部非空用户消息，不展示非活动分支消息。
+- 新提交的用户消息无需等待权威刷新即可出现，完成同步后不会重复。
+- 点击已渲染问题时，保持现有准确跳转行为。
+- 点击未渲染问题时，自动驱动加载，并在 ChatGPT 通过滚动暴露该消息后完成定位。
+- 同步失败时，仍保留可用的 DOM 问题目录。
+- 定位失败必须在 10 秒内终止，且不得遗留自动滚动任务。
+- 路由或分支切换后，不得显示上一状态的过期问题。
+- 左侧 AI 回复标题大纲保持现有行为。
+- 会话内容和认证令牌不持久化，也不发送到 `chatgpt.com` 之外。

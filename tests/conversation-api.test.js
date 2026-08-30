@@ -188,6 +188,50 @@ test("使用同源凭据读取会话", async () => {
   assert.equal(calls[0].init.credentials, "include");
 });
 
+test("缓存模型不保留完整问题正文或 DOM 引用", () => {
+  const api = loadApi();
+  const element = { privateDomReference: true };
+  const cached = api.createConversationCacheEntry({
+    branch: [
+      {
+        nodeId: "node-1",
+        messageId: "message-1",
+        role: "user",
+        branchIndex: 0,
+        message: { privatePayload: true }
+      }
+    ],
+    questions: [
+      {
+        id: "question-message-1",
+        messageId: "message-1",
+        nodeId: "node-1",
+        title: "规范化标题",
+        fullText: "不应跨会话保留的完整敏感正文",
+        branchIndex: 0,
+        element,
+        source: "api"
+      }
+    ]
+  });
+
+  assert.deepEqual(Object.keys(cached.branch[0]).sort(), [
+    "branchIndex",
+    "messageId",
+    "nodeId",
+    "role"
+  ]);
+  assert.deepEqual(Object.keys(cached.questions[0]).sort(), [
+    "branchIndex",
+    "id",
+    "messageId",
+    "nodeId",
+    "source",
+    "title"
+  ]);
+  assert.equal(JSON.stringify(cached).includes("完整敏感正文"), false);
+});
+
 test("认证失败后获取会话令牌并只重试一次", async () => {
   const api = loadApi();
   const calls = [];

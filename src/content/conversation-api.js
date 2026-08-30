@@ -226,6 +226,29 @@
     return canonical.concat(pending.map((item) => ({ ...item })));
   }
 
+  function createConversationCacheEntry(result) {
+    return {
+      branch: (Array.isArray(result?.branch) ? result.branch : []).map(
+        ({ nodeId, messageId, role, branchIndex }) => ({
+          nodeId,
+          messageId,
+          role,
+          branchIndex
+        })
+      ),
+      questions: (Array.isArray(result?.questions) ? result.questions : []).map(
+        ({ id, messageId, nodeId, title, branchIndex, source }) => ({
+          id,
+          messageId,
+          nodeId,
+          title,
+          branchIndex,
+          source
+        })
+      )
+    };
+  }
+
   function createLinkedAbortSignal(...signals) {
     const controller = new AbortController();
     const cleanups = [];
@@ -346,6 +369,7 @@
     ConversationResponseError,
     buildActiveBranch,
     buildQuestionItems,
+    createConversationCacheEntry,
     createRequestGate,
     getConversationId,
     loadConversation,

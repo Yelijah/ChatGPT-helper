@@ -33,6 +33,7 @@
   let currentPath = window.location.pathname;
   let stopObserving = () => {};
   let stopObservingMessages = () => {};
+  let stopObservingRefreshTriggers = () => {};
   let scrollTicking = false;
   let routeTimer = 0;
   let syncTimer = 0;
@@ -48,16 +49,10 @@
   let directoryStatus = { kind: "ready", message: "" };
   let navigationStatus = null;
   let routeDomReady = true;
-  let routeDomBaselineSignature = "";
+  let routeDomBaselineElements = new WeakSet();
 
   function getEffectiveStatus() {
     return navigationStatus || directoryStatus;
-  }
-
-  function getDomItemsSignature(questionItems) {
-    return (Array.isArray(questionItems) ? questionItems : [])
-      .map((item) => `${item.messageId || item.id}:${item.fullText || item.title}`)
-      .join("|");
   }
 
   function getBranchSignature(branch) {
@@ -88,8 +83,9 @@
   }
 
   function rememberConversation(conversationId, result) {
+    const cacheEntry = conversationApi.createConversationCacheEntry(result);
     conversationCache.delete(conversationId);
-    conversationCache.set(conversationId, result);
+    conversationCache.set(conversationId, cacheEntry);
     while (conversationCache.size > MAX_CONVERSATION_CACHE_SIZE) {
       const oldestKey = conversationCache.keys().next().value;
       conversationCache.delete(oldestKey);
@@ -306,16 +302,22 @@
       : domAdapter.getDomQuestionItems?.() || domAdapter.getQuestionItems();
     let acceptedDomItems = domItems;
     if (!routeDomReady) {
-      const nextSignature = getDomItemsSignature(domItems);
-      if (nextSignature !== routeDomBaselineSignature) {
-        routeDomReady = true;
-      } else {
-        const canonicalMessageIds = new Set(
-          canonicalItems.map((item) => item.messageId).filter(Boolean)
+      const hasBaselineElement = domItems.some((item) => {
+        return (
+          item.element instanceof HTMLElement &&
+          routeDomBaselineElements.has(item.element)
         );
-        acceptedDomItems = domItems.filter((item) => {
-          return item.messageId && canonicalMessageIds.has(item.messageId);
-        });
+      });
+      acceptedDomItems = domItems.filter((item) => {
+        return (
+          item.element instanceof HTMLElement &&
+          !routeDomBaselineElements.has(item.element)
+        );
+      });
+      if (!hasBaselineElement) {
+        routeDomReady = true;
+        routeDomBaselineElements = new WeakSet();
+        acceptedDomItems = domItems;
       }
     }
     items = conversationApi.mergeQuestionItems(canonicalItems, acceptedDomItems);
@@ -504,15 +506,19 @@
   function restartObserver() {
     stopObserving();
     stopObservingMessages();
+    stopObservingRefreshTriggers();
     stopObserving = domAdapter.observeQuestions((nextItems) => {
       refreshQuestions(nextItems);
-      scheduleConversationRefresh();
     });
     stopObservingMessages =
       domAdapter.observeAssistantMessages?.(() => {
         if (domAdapter.isConversationRoute()) {
           refreshMessageOutline();
         }
+      }) || (() => {});
+    stopObservingRefreshTriggers =
+      domAdapter.observeConversationRefreshTriggers?.(() => {
+        scheduleConversationRefresh();
       }) || (() => {});
   }
 
@@ -521,7 +527,11 @@
       return;
     }
     currentPath = window.location.pathname;
-    routeDomBaselineSignature = getDomItemsSignature(domItems);
+    routeDomBaselineElements = new WeakSet(
+      domItems
+        .map((item) => item.element)
+        .filter((element) => element instanceof HTMLElement)
+    );
     routeDomReady = false;
     requestGate.abort();
     cancelNavigation();
@@ -567,6 +577,7 @@
     navigationController?.abort();
     stopObserving();
     stopObservingMessages();
+    stopObservingRefreshTriggers();
     window.clearTimeout(routeTimer);
     window.clearTimeout(syncTimer);
     initialRefreshTimers.splice(0).forEach((timer) => window.clearTimeout(timer));

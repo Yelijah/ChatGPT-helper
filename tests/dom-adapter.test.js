@@ -132,7 +132,7 @@ test("根据消息 ID 查找完整轮次并排除扩展节点", () => {
   }
 });
 
-test("已渲染消息 ID 变化会触发会话观察回调", async () => {
+test("仅助手渲染窗口变化不会触发问题目录刷新", async () => {
   const context = installDom();
   try {
     let callbackCount = 0;
@@ -151,6 +151,26 @@ test("已渲染消息 ID 变化会触发会话观察回调", async () => {
     });
     context.dom.window.document.querySelector("main").appendChild(assistant);
     await new Promise((resolve) => setTimeout(resolve, 20));
+    stop();
+    assert.equal(callbackCount, 0);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("分支按钮交互会触发会话接口刷新信号", () => {
+  const context = installDom();
+  try {
+    let callbackCount = 0;
+    const stop = context.adapter.observeConversationRefreshTriggers(() => {
+      callbackCount += 1;
+    });
+    const button = context.dom.window.document.createElement("button");
+    button.setAttribute("aria-label", "Next response");
+    context.dom.window.document.body.appendChild(button);
+    button.dispatchEvent(
+      new context.dom.window.MouseEvent("click", { bubbles: true })
+    );
     stop();
     assert.equal(callbackCount, 1);
   } finally {

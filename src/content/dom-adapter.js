@@ -811,13 +811,9 @@
 
     let frameId = 0;
     function getSignature(questionItems) {
-      const questionSignature = questionItems
+      return questionItems
         .map((item) => `${item.id}:${item.title}`)
         .join("|");
-      const messageSignature = getRenderedMessageEntries()
-        .map((entry) => entry.messageId)
-        .join("|");
-      return `${questionSignature}::${messageSignature}`;
     }
 
     let lastSignature = getSignature(getQuestionItems());
@@ -853,6 +849,65 @@
       }
 
       observer.disconnect();
+    };
+  }
+
+  function observeConversationRefreshTriggers(onChange) {
+    if (typeof onChange !== "function") {
+      return () => {};
+    }
+
+    const triggerPattern =
+      /branch|分支|previous response|next response|上一(?:个)?回复|下一(?:个)?回复|regenerate|重新生成|retry|重试|send|发送/i;
+
+    function isComposerTarget(target) {
+      return Boolean(
+        target?.matches?.("textarea, [contenteditable='true']") ||
+          target?.closest?.("textarea, [contenteditable='true']")
+      );
+    }
+
+    function handleClick(event) {
+      const button = event.target?.closest?.("button");
+      if (!button) {
+        return;
+      }
+      const metadata = [
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.getAttribute("data-testid"),
+        button.textContent
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (triggerPattern.test(metadata)) {
+        onChange();
+      }
+    }
+
+    function handleSubmit() {
+      onChange();
+    }
+
+    function handleKeydown(event) {
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.isComposing &&
+        isComposerTarget(event.target)
+      ) {
+        onChange();
+      }
+    }
+
+    document.addEventListener("click", handleClick, true);
+    document.addEventListener("submit", handleSubmit, true);
+    document.addEventListener("keydown", handleKeydown, true);
+
+    return () => {
+      document.removeEventListener("click", handleClick, true);
+      document.removeEventListener("submit", handleSubmit, true);
+      document.removeEventListener("keydown", handleKeydown, true);
     };
   }
 
@@ -922,6 +977,7 @@
     getScrollContainer,
     getScrollMetrics,
     observeAssistantMessages,
+    observeConversationRefreshTriggers,
     observeQuestions,
     scrollByAmount,
     scrollToMessageElement,

@@ -89,6 +89,7 @@ function installApp(options = {}) {
   const navigationCalls = [];
   let sidebarOptions = null;
   let questionObserver = null;
+  let refreshTriggerObserver = null;
 
   const conversationApi = {
     ...realConversationApi,
@@ -109,6 +110,12 @@ function installApp(options = {}) {
       questionObserver = callback;
       return () => {
         questionObserver = null;
+      };
+    },
+    observeConversationRefreshTriggers(callback) {
+      refreshTriggerObserver = callback;
+      return () => {
+        refreshTriggerObserver = null;
       };
     },
     observeAssistantMessages: () => () => {},
@@ -192,6 +199,10 @@ function installApp(options = {}) {
     renderCalls,
     getSidebarOptions: () => sidebarOptions,
     emitQuestions: (items) => questionObserver?.(items),
+    emitRefreshTrigger: () => refreshTriggerObserver?.(),
+    setDomItems(nextItems) {
+      domItems.splice(0, domItems.length, ...nextItems);
+    },
     cleanup
   };
 }
@@ -246,6 +257,50 @@ test("旧会话响应后返回时不会覆盖新会话", async () => {
       context.outlineCalls.filter((call) => call === "mount").length >= 2,
       true
     );
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("跨路由相同文本的新 DOM 节点仍可作为降级目录", async () => {
+  let loadCount = 0;
+  const context = installApp({
+    domItems: [],
+    async loadConversation() {
+      loadCount += 1;
+      if (loadCount === 1) {
+        return makeResult("old-conversation");
+      }
+      throw new Error("模拟新会话接口失败");
+    }
+  });
+  try {
+    const oldElement = context.dom.window.document.createElement("article");
+    const oldItem = {
+      id: "chatgpt-helper-question-pending-1",
+      messageId: null,
+      title: "你好",
+      fullText: "你好",
+      branchIndex: null,
+      element: oldElement,
+      source: "dom"
+    };
+    context.setDomItems([oldItem]);
+    context.emitQuestions([oldItem]);
+    await flush();
+
+    context.dom.window.history.pushState({}, "", "/c/new-conversation");
+    const newElement = context.dom.window.document.createElement("article");
+    const newItem = { ...oldItem, element: newElement };
+    context.setDomItems([newItem]);
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    context.emitQuestions([newItem]);
+    await flush();
+
+    const state = context.app.getState();
+    assert.equal(state.status.kind, "degraded");
+    assert.equal(state.items.length, 1);
+    assert.equal(state.items[0].element, newElement);
   } finally {
     context.cleanup();
   }
@@ -396,6 +451,23 @@ test("会话内存缓存最多保留五项", async () => {
       await flush();
     }
     assert.equal(context.app.getState().cacheSize, 5);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("普通问题 DOM 变化不会重复请求接口，显式交互信号会请求", async () => {
+  const context = installApp();
+  try {
+    await flush();
+    const firstLoadCount = context.loadCalls.length;
+    context.emitQuestions([]);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(context.loadCalls.length, firstLoadCount);
+
+    context.emitRefreshTrigger();
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(context.loadCalls.length, firstLoadCount + 1);
   } finally {
     context.cleanup();
   }

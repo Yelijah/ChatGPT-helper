@@ -401,17 +401,30 @@
       return null;
     }
 
-    const matched = document.querySelector(
+    const root = getConversationRoot();
+    if (!root) {
+      return null;
+    }
+
+    const matched = root.querySelector(
       `[data-message-id='${CSS.escape(String(messageId))}']`
     );
-    return matched instanceof HTMLElement ? findTurnContainer(matched) : null;
+    const element = matched instanceof HTMLElement ? findTurnContainer(matched) : null;
+    return element?.isConnected && isVisibleConversationBlock(element)
+      ? element
+      : null;
   }
 
   function getRenderedMessageEntries() {
+    const root = getConversationRoot();
+    if (!root) {
+      return [];
+    }
+
     const seen = new Set();
     const entries = [];
 
-    document.querySelectorAll("[data-message-id]").forEach((node) => {
+    root.querySelectorAll("[data-message-id]").forEach((node) => {
       if (!(node instanceof HTMLElement)) {
         return;
       }
@@ -426,7 +439,7 @@
       }
 
       const element = findTurnContainer(node);
-      if (!element) {
+      if (!element?.isConnected || !isVisibleConversationBlock(element)) {
         return;
       }
 
@@ -797,9 +810,17 @@
     }
 
     let frameId = 0;
-    let lastSignature = getQuestionItems()
-      .map((item) => `${item.id}:${item.title}`)
-      .join("|");
+    function getSignature(questionItems) {
+      const questionSignature = questionItems
+        .map((item) => `${item.id}:${item.title}`)
+        .join("|");
+      const messageSignature = getRenderedMessageEntries()
+        .map((entry) => entry.messageId)
+        .join("|");
+      return `${questionSignature}::${messageSignature}`;
+    }
+
+    let lastSignature = getSignature(getQuestionItems());
 
     const observer = new MutationObserver(() => {
       if (frameId) {
@@ -809,9 +830,7 @@
       frameId = requestAnimationFrame(() => {
         frameId = 0;
         const nextItems = getQuestionItems();
-        const nextSignature = nextItems
-          .map((item) => `${item.id}:${item.title}`)
-          .join("|");
+        const nextSignature = getSignature(nextItems);
 
         if (nextSignature === lastSignature) {
           return;

@@ -20,6 +20,7 @@
 
   const requestGate = conversationApi.createRequestGate();
   const conversationCache = new Map();
+  const MAX_CONVERSATION_CACHE_SIZE = 5;
   const historyOriginals = new Map();
   let sidebar = null;
   let messageOutline = null;
@@ -27,6 +28,7 @@
   let domItems = [];
   let canonicalItems = [];
   let activeBranch = [];
+  let activeBranchSignature = "";
   let activeId = null;
   let currentPath = window.location.pathname;
   let stopObserving = () => {};
@@ -45,9 +47,53 @@
   const initialRefreshTimers = [];
   let directoryStatus = { kind: "ready", message: "" };
   let navigationStatus = null;
+  let routeDomReady = true;
+  let routeDomBaselineSignature = "";
 
   function getEffectiveStatus() {
     return navigationStatus || directoryStatus;
+  }
+
+  function getDomItemsSignature(questionItems) {
+    return (Array.isArray(questionItems) ? questionItems : [])
+      .map((item) => `${item.messageId || item.id}:${item.fullText || item.title}`)
+      .join("|");
+  }
+
+  function getBranchSignature(branch) {
+    return (Array.isArray(branch) ? branch : [])
+      .map((entry) => `${entry.nodeId}:${entry.messageId}:${entry.branchIndex}`)
+      .join("|");
+  }
+
+  function cancelNavigation() {
+    navigationController?.abort();
+    navigationController = null;
+    navigationStatus = null;
+    releaseActiveLock();
+  }
+
+  function setActiveBranch(nextBranch) {
+    const normalized = Array.isArray(nextBranch) ? nextBranch : [];
+    const nextSignature = getBranchSignature(normalized);
+    if (
+      activeBranchSignature &&
+      nextSignature !== activeBranchSignature &&
+      navigationController
+    ) {
+      cancelNavigation();
+    }
+    activeBranch = normalized;
+    activeBranchSignature = nextSignature;
+  }
+
+  function rememberConversation(conversationId, result) {
+    conversationCache.delete(conversationId);
+    conversationCache.set(conversationId, result);
+    while (conversationCache.size > MAX_CONVERSATION_CACHE_SIZE) {
+      const oldestKey = conversationCache.keys().next().value;
+      conversationCache.delete(oldestKey);
+    }
   }
 
   function ensureSidebar() {
@@ -181,12 +227,48 @@
   }
 
   function pickActiveQuestion() {
+    const branchByMessageId = new Map(
+      activeBranch.map((entry) => [entry.messageId, entry])
+    );
+    const threshold = 160;
+    let branchAnchor = null;
+    let branchAnchorDistance = Number.POSITIVE_INFINITY;
+
+    (domAdapter.getRenderedMessageEntries?.() || []).forEach((renderedEntry) => {
+      const branchEntry = branchByMessageId.get(renderedEntry.messageId);
+      if (!branchEntry || !(renderedEntry.element instanceof HTMLElement)) {
+        return;
+      }
+      const rect = renderedEntry.element.getBoundingClientRect();
+      const distance =
+        threshold >= rect.top && threshold <= rect.bottom
+          ? 0
+          : Math.min(Math.abs(rect.top - threshold), Math.abs(rect.bottom - threshold));
+      if (distance < branchAnchorDistance) {
+        branchAnchorDistance = distance;
+        branchAnchor = branchEntry;
+      }
+    });
+
+    if (branchAnchor) {
+      const precedingQuestion = items
+        .filter((item) => {
+          return (
+            Number.isFinite(item.branchIndex) &&
+            item.branchIndex <= branchAnchor.branchIndex
+          );
+        })
+        .sort((first, second) => second.branchIndex - first.branchIndex)[0];
+      if (precedingQuestion) {
+        return precedingQuestion;
+      }
+    }
+
     const rendered = items.filter((item) => item.element instanceof HTMLElement);
     if (!rendered.length) {
       return getItemById(activeLockId) || getItemById(activeId);
     }
 
-    const threshold = 160;
     let best = null;
     let nearestDistance = Number.POSITIVE_INFINITY;
     rendered.forEach((item) => {
@@ -222,7 +304,21 @@
     domItems = Array.isArray(nextDomItems)
       ? nextDomItems
       : domAdapter.getDomQuestionItems?.() || domAdapter.getQuestionItems();
-    items = conversationApi.mergeQuestionItems(canonicalItems, domItems);
+    let acceptedDomItems = domItems;
+    if (!routeDomReady) {
+      const nextSignature = getDomItemsSignature(domItems);
+      if (nextSignature !== routeDomBaselineSignature) {
+        routeDomReady = true;
+      } else {
+        const canonicalMessageIds = new Set(
+          canonicalItems.map((item) => item.messageId).filter(Boolean)
+        );
+        acceptedDomItems = domItems.filter((item) => {
+          return item.messageId && canonicalMessageIds.has(item.messageId);
+        });
+      }
+    }
+    items = conversationApi.mergeQuestionItems(canonicalItems, acceptedDomItems);
 
     if (!domAdapter.isConversationRoute()) {
       items = [];
@@ -257,7 +353,7 @@
     const conversationId = conversationApi.getConversationId(requestPath);
     if (!conversationId) {
       requestGate.abort();
-      activeBranch = [];
+      setActiveBranch([]);
       canonicalItems = [];
       directoryStatus = { kind: "ready", message: "" };
       refreshQuestions();
@@ -266,7 +362,7 @@
 
     const cached = conversationCache.get(conversationId);
     if (cached) {
-      activeBranch = cached.branch;
+      setActiveBranch(cached.branch);
       canonicalItems = cached.questions;
       directoryStatus = { kind: "ready", message: "" };
     } else if (!canonicalItems.length) {
@@ -287,9 +383,9 @@
         return;
       }
 
-      activeBranch = result.branch;
+      setActiveBranch(result.branch);
       canonicalItems = result.questions;
-      conversationCache.set(conversationId, result);
+      rememberConversation(conversationId, result);
       directoryStatus = { kind: "ready", message: "" };
       refreshQuestions();
     } catch (error) {
@@ -298,7 +394,9 @@
       }
       directoryStatus = {
         kind: "degraded",
-        message: "完整目录同步失败，当前显示页面内消息"
+        message: canonicalItems.length
+          ? "完整目录同步失败，正在显示上次同步目录"
+          : "完整目录同步失败，当前显示页面内消息"
       };
       refreshQuestions();
     }
@@ -355,6 +453,9 @@
         result.status === "found"
           ? null
           : { kind: "navigation-error", message: "ChatGPT 未能加载该消息" };
+      if (result.status !== "found") {
+        releaseActiveLock();
+      }
     } catch (error) {
       if (navigationController !== controller) {
         return;
@@ -363,6 +464,7 @@
         error?.name === "AbortError"
           ? null
           : { kind: "navigation-error", message: "消息定位失败" };
+      releaseActiveLock();
     } finally {
       if (navigationController === controller) {
         navigationController = null;
@@ -380,9 +482,7 @@
     requestAnimationFrame(() => {
       scrollTicking = false;
       if (navigationController && Date.now() > programmaticScrollDeadline) {
-        navigationController.abort();
-        navigationController = null;
-        navigationStatus = null;
+        cancelNavigation();
       }
       if (activeLockId) {
         if (isLockedTargetSettled() || Date.now() >= activeLockDeadline) {
@@ -421,13 +521,13 @@
       return;
     }
     currentPath = window.location.pathname;
+    routeDomBaselineSignature = getDomItemsSignature(domItems);
+    routeDomReady = false;
     requestGate.abort();
-    navigationController?.abort();
-    navigationController = null;
-    navigationStatus = null;
+    cancelNavigation();
     activeBranch = [];
+    activeBranchSignature = "";
     canonicalItems = [];
-    releaseActiveLock();
     window.clearTimeout(syncTimer);
     window.clearTimeout(routeTimer);
     messageOutline?.destroy();
@@ -500,6 +600,9 @@
     getState() {
       return {
         activeBranch: activeBranch.slice(),
+        activeId,
+        activeLockId,
+        cacheSize: conversationCache.size,
         items: items.slice(),
         status: getEffectiveStatus()
       };

@@ -19,6 +19,7 @@ test("从普通和项目会话路径提取会话 ID", () => {
     "conversation-2"
   );
   assert.equal(api.getConversationId("/projects/project-1"), null);
+  assert.equal(api.getConversationId("/c/%E0%A4%A"), null);
 });
 
 test("只沿 current_node 父链生成当前分支的用户问题", () => {
@@ -174,6 +175,12 @@ test("使用同源凭据读取会话", async () => {
 
   const result = await api.loadConversation("conversation/id", { fetchImpl });
   assert.equal(result.questions.length, 1);
+  assert.deepEqual(Object.keys(result.branch[0]).sort(), [
+    "branchIndex",
+    "messageId",
+    "nodeId",
+    "role"
+  ]);
   assert.equal(
     calls[0].url,
     "/backend-api/conversation/conversation%2Fid"

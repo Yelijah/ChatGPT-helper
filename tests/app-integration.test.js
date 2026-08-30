@@ -67,6 +67,11 @@ function installApp(options = {}) {
   globalThis.requestAnimationFrame = (callback) => setTimeout(callback, 0);
   globalThis.cancelAnimationFrame = clearTimeout;
 
+  resetHelper();
+  const realConversationApi = loadScript(
+    "src/content/conversation-api.js"
+  ).conversationApi;
+
   const domItems = options.domItems || [
     {
       id: "question-dom-message",
@@ -84,38 +89,9 @@ function installApp(options = {}) {
   const navigationCalls = [];
   let sidebarOptions = null;
   let questionObserver = null;
-  let generation = 0;
-  let activeController = null;
 
   const conversationApi = {
-    getConversationId(pathname) {
-      return String(pathname).match(/\/c\/([^/]+)/)?.[1] || null;
-    },
-    mergeQuestionItems(apiItems, currentDomItems) {
-      if (!apiItems.length) return currentDomItems.map((item) => ({ ...item }));
-      const domById = new Map(currentDomItems.map((item) => [item.messageId, item]));
-      return apiItems.map((item) => ({
-        ...item,
-        element: domById.get(item.messageId)?.element || item.element || null
-      }));
-    },
-    createRequestGate() {
-      return {
-        next() {
-          activeController?.abort();
-          activeController = new AbortController();
-          generation += 1;
-          return { generation, signal: activeController.signal };
-        },
-        isCurrent(value) {
-          return value === generation && !activeController?.signal.aborted;
-        },
-        abort() {
-          activeController?.abort();
-          generation += 1;
-        }
-      };
-    },
+    ...realConversationApi,
     async loadConversation(conversationId, requestOptions) {
       loadCalls.push({ conversationId, requestOptions });
       return options.loadConversation
@@ -140,7 +116,8 @@ function installApp(options = {}) {
     extractHeadings: () => [],
     scrollToHeading: () => true,
     findMessageElement: () => null,
-    getRenderedMessageEntries: () => [],
+    getRenderedMessageEntries: () =>
+      options.renderedEntriesFactory?.({ dom, element }) || [],
     getScrollMetrics: () => ({ top: 0, maxTop: 0, clientHeight: 500 }),
     waitForMessageRender: async () => "timeout",
     scrollByAmount: () => true,
@@ -187,7 +164,6 @@ function installApp(options = {}) {
     }
   };
 
-  resetHelper();
   globalThis.__CHATGPT_HELPER__ = {
     conversationApi,
     domAdapter,
@@ -257,7 +233,19 @@ test("旧会话响应后返回时不会覆盖新会话", async () => {
       context.app.getState().items.map((item) => item.messageId),
       ["new-conversation-message"]
     );
+    assert.equal(
+      context.app.getState().items.some((item) => item.messageId === "dom-message"),
+      false
+    );
     assert.equal(context.loadCalls[0].requestOptions.signal.aborted, true);
+    assert.equal(
+      context.outlineCalls.filter((call) => call === "destroy").length >= 1,
+      true
+    );
+    assert.equal(
+      context.outlineCalls.filter((call) => call === "mount").length >= 2,
+      true
+    );
   } finally {
     context.cleanup();
   }
@@ -296,6 +284,118 @@ test("点击未渲染问题时显示定位状态并调用定位器", async () =>
     navigation.resolve({ status: "not-rendered" });
     await flush();
     assert.equal(context.renderCalls.at(-1).status.kind, "navigation-error");
+    assert.equal(context.app.getState().activeLockId, null);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("长 AI 回复覆盖阈值时高亮其前一条用户问题", async () => {
+  const firstUser = {
+    id: "question-user-before",
+    messageId: "user-before",
+    nodeId: "node-user-before",
+    title: "前一条问题",
+    fullText: "前一条问题",
+    branchIndex: 0,
+    element: null,
+    source: "api"
+  };
+  const nextUser = {
+    id: "question-user-after",
+    messageId: "user-after",
+    nodeId: "node-user-after",
+    title: "后一条问题",
+    fullText: "后一条问题",
+    branchIndex: 2,
+    element: null,
+    source: "api"
+  };
+  const context = installApp({
+    async loadConversation() {
+      return {
+        branch: [
+          { nodeId: "n0", messageId: "user-before", role: "user", branchIndex: 0 },
+          { nodeId: "n1", messageId: "assistant-long", role: "assistant", branchIndex: 1 },
+          { nodeId: "n2", messageId: "user-after", role: "user", branchIndex: 2 }
+        ],
+        questions: [firstUser, nextUser]
+      };
+    },
+    renderedEntriesFactory({ dom }) {
+      const assistant = dom.window.document.createElement("article");
+      assistant.getBoundingClientRect = () => ({ top: 20, bottom: 600 });
+      const next = dom.window.document.createElement("article");
+      next.getBoundingClientRect = () => ({ top: 650, bottom: 750 });
+      return [
+        { messageId: "assistant-long", element: assistant },
+        { messageId: "user-after", element: next }
+      ];
+    }
+  });
+  try {
+    await flush();
+    assert.equal(context.app.getState().activeId, "question-user-before");
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("手动滚动会取消定位并立即释放活动锁", async () => {
+  const navigation = deferred();
+  const context = installApp({
+    navigateToMessage() {
+      return navigation.promise;
+    }
+  });
+  try {
+    await flush();
+    context.getSidebarOptions().onSelect(context.app.getState().items[0]);
+    const signal = context.navigationCalls[0].signal;
+    context.dom.window.dispatchEvent(new context.dom.window.Event("scroll"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(signal.aborted, true);
+    assert.equal(context.app.getState().activeLockId, null);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("权威活动分支变化会取消旧分支定位", async () => {
+  const navigation = deferred();
+  let loadCount = 0;
+  const context = installApp({
+    async loadConversation() {
+      loadCount += 1;
+      return makeResult(loadCount === 1 ? "branch-a" : "branch-b");
+    },
+    navigateToMessage() {
+      return navigation.promise;
+    }
+  });
+  try {
+    await flush();
+    context.getSidebarOptions().onSelect(context.app.getState().items[0]);
+    const signal = context.navigationCalls[0].signal;
+    await context.app.refreshConversation();
+    assert.equal(signal.aborted, true);
+    assert.equal(context.app.getState().activeLockId, null);
+    assert.equal(context.app.getState().items[0].messageId, "branch-b");
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("会话内存缓存最多保留五项", async () => {
+  const context = installApp();
+  try {
+    await flush();
+    for (let index = 1; index <= 6; index += 1) {
+      context.dom.window.history.pushState({}, "", `/c/cache-${index}`);
+      await new Promise((resolve) => setTimeout(resolve, 140));
+      await flush();
+    }
+    assert.equal(context.app.getState().cacheSize, 5);
   } finally {
     context.cleanup();
   }

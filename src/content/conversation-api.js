@@ -20,7 +20,18 @@
 
   function getConversationId(pathname = global.location?.pathname || "") {
     const match = String(pathname).match(/(?:^|\/)c\/([^/?#]+)/i);
-    return match ? decodeURIComponent(match[1]) : null;
+    if (!match) {
+      return null;
+    }
+
+    try {
+      return decodeURIComponent(match[1]);
+    } catch (error) {
+      if (error instanceof URIError) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   function normalizeQuestionTitle(rawText) {
@@ -292,10 +303,15 @@
       }
 
       const payload = await response.json();
-      const branch = buildActiveBranch(payload);
+      const parsedBranch = buildActiveBranch(payload);
       return {
-        branch,
-        questions: buildQuestionItems(branch)
+        branch: parsedBranch.map(({ nodeId, messageId, role, branchIndex }) => ({
+          nodeId,
+          messageId,
+          role,
+          branchIndex
+        })),
+        questions: buildQuestionItems(parsedBranch)
       };
     } finally {
       global.clearTimeout(timeoutId);

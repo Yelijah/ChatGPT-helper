@@ -102,14 +102,57 @@ test("DOM 问题携带宿主消息 ID 和规范化全文", () => {
 test("根据消息 ID 查找完整轮次并排除扩展节点", () => {
   const context = installDom();
   try {
+    const outside = context.dom.window.document.createElement("article");
+    outside.setAttribute("data-message-id", "outside-message");
+    context.dom.window.document.body.appendChild(outside);
+    const hidden = context.dom.window.document.createElement("article");
+    hidden.setAttribute("data-message-id", "hidden-message");
+    hidden.getBoundingClientRect = () => ({
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: 0,
+      width: 0,
+      height: 0
+    });
+    context.dom.window.document.querySelector("main").appendChild(hidden);
+
     assert.equal(
       context.adapter.findMessageElement("message-user-1").tagName,
       "ARTICLE"
     );
+    assert.equal(context.adapter.findMessageElement("outside-message"), null);
+    assert.equal(context.adapter.findMessageElement("hidden-message"), null);
     assert.deepEqual(
       context.adapter.getRenderedMessageEntries().map((entry) => entry.messageId),
       ["message-user-1"]
     );
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("已渲染消息 ID 变化会触发会话观察回调", async () => {
+  const context = installDom();
+  try {
+    let callbackCount = 0;
+    const stop = context.adapter.observeQuestions(() => {
+      callbackCount += 1;
+    });
+    const assistant = context.dom.window.document.createElement("article");
+    assistant.setAttribute("data-message-id", "message-assistant-2");
+    assistant.getBoundingClientRect = () => ({
+      top: 300,
+      bottom: 500,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 200
+    });
+    context.dom.window.document.querySelector("main").appendChild(assistant);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stop();
+    assert.equal(callbackCount, 1);
   } finally {
     context.cleanup();
   }

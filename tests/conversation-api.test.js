@@ -227,9 +227,44 @@ test("缓存模型不保留完整问题正文或 DOM 引用", () => {
     "messageId",
     "nodeId",
     "source",
+    "textFingerprint",
     "title"
   ]);
   assert.equal(JSON.stringify(cached).includes("完整敏感正文"), false);
+});
+
+test("最小化缓存仍可按指纹合并无消息 ID 的 DOM 问题", () => {
+  const api = loadApi();
+  const cached = api.createConversationCacheEntry({
+    branch: [],
+    questions: [
+      {
+        id: "question-m1",
+        messageId: "m1",
+        nodeId: "n1",
+        title: "你好",
+        fullText: "你好\n包含完整正文",
+        branchIndex: 0,
+        source: "api"
+      }
+    ]
+  });
+  const element = { marker: "rendered-without-message-id" };
+  const merged = api.mergeQuestionItems(cached.questions, [
+    {
+      id: "chatgpt-helper-question-pending-1",
+      messageId: null,
+      title: "你好",
+      fullText: "  你好  \n 包含完整正文 ",
+      element,
+      source: "dom"
+    }
+  ]);
+
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, "question-m1");
+  assert.equal(merged[0].element, element);
+  assert.equal("fullText" in cached.questions[0], false);
 });
 
 test("认证失败后获取会话令牌并只重试一次", async () => {

@@ -2,6 +2,16 @@
   const NAMESPACE = "__CHATGPT_HELPER__";
   const SESSION_ENDPOINT = "/api/auth/session";
   const CONVERSATION_ENDPOINT_PREFIX = "/backend-api/conversation/";
+  const FINGERPRINT_SALT = (() => {
+    const values = new Uint32Array(2);
+    if (global.crypto?.getRandomValues) {
+      global.crypto.getRandomValues(values);
+    } else {
+      values[0] = Math.floor(Math.random() * 0xffffffff);
+      values[1] = Math.floor(Math.random() * 0xffffffff);
+    }
+    return `${values[0].toString(16)}${values[1].toString(16)}`;
+  })();
 
   class ConversationResponseError extends Error {
     constructor(message) {
@@ -47,6 +57,27 @@
       .trim();
 
     return Array.from(normalized).slice(0, 120).join("");
+  }
+
+  function createTextFingerprint(rawText) {
+    const normalized = normalizeMessageText(rawText);
+    if (!normalized) {
+      return null;
+    }
+
+    const input = `${FINGERPRINT_SALT}\u0000${normalized}`;
+    let first = 0x811c9dc5;
+    let second = 0x9e3779b9;
+    for (let index = 0; index < input.length; index += 1) {
+      const code = input.charCodeAt(index);
+      first = Math.imul(first ^ code, 0x01000193);
+      second = Math.imul(second ^ code, 0x85ebca6b);
+    }
+    return `v1-${(first >>> 0).toString(16).padStart(8, "0")}${(
+      second >>> 0
+    )
+      .toString(16)
+      .padStart(8, "0")}`;
   }
 
   function normalizeMessageText(rawText) {
@@ -167,6 +198,7 @@
           nodeId: entry.nodeId,
           title,
           fullText,
+          textFingerprint: createTextFingerprint(fullText),
           branchIndex: entry.branchIndex,
           element: null,
           source: "api"
@@ -206,11 +238,14 @@
       }
 
       const normalizedDomText = normalizeMessageText(domItem.fullText);
+      const domFingerprint = createTextFingerprint(normalizedDomText);
       const textMatch = unmatchedTail.find((item) => {
+        const itemFingerprint =
+          item.textFingerprint || createTextFingerprint(item.fullText);
         return (
           !matchedIds.has(item.id) &&
-          item.fullText &&
-          item.fullText === normalizedDomText
+          itemFingerprint &&
+          itemFingerprint === domFingerprint
         );
       });
 
@@ -237,11 +272,22 @@
         })
       ),
       questions: (Array.isArray(result?.questions) ? result.questions : []).map(
-        ({ id, messageId, nodeId, title, branchIndex, source }) => ({
+        ({
           id,
           messageId,
           nodeId,
           title,
+          fullText,
+          textFingerprint,
+          branchIndex,
+          source
+        }) => ({
+          id,
+          messageId,
+          nodeId,
+          title,
+          textFingerprint:
+            textFingerprint || createTextFingerprint(fullText),
           branchIndex,
           source
         })
@@ -370,6 +416,7 @@
     buildActiveBranch,
     buildQuestionItems,
     createConversationCacheEntry,
+    createTextFingerprint,
     createRequestGate,
     getConversationId,
     loadConversation,

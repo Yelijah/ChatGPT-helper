@@ -44,6 +44,13 @@ function makeResult(messageId) {
   };
 }
 
+function makeTextResult(messageId, text) {
+  const result = makeResult(messageId);
+  result.questions[0].title = text;
+  result.questions[0].fullText = text;
+  return result;
+}
+
 function installApp(options = {}) {
   const previous = new Map(GLOBAL_KEYS.map((key) => [key, globalThis[key]]));
   const dom = new JSDOM(`<!doctype html><body>
@@ -469,6 +476,55 @@ test("普通问题 DOM 变化不会重复请求接口，显式交互信号会请
     await new Promise((resolve) => setTimeout(resolve, 600));
     assert.equal(context.loadCalls.length, firstLoadCount + 1);
   } finally {
+    context.cleanup();
+  }
+});
+
+test("返回缓存会话时无消息 ID 的 DOM 问题不会重复", async () => {
+  const pendingRefresh = deferred();
+  let loadCount = 0;
+  const context = installApp({
+    domItems: [],
+    loadConversation(conversationId) {
+      loadCount += 1;
+      if (loadCount >= 3) {
+        return pendingRefresh.promise;
+      }
+      return Promise.resolve(makeTextResult(conversationId, "你好"));
+    }
+  });
+  try {
+    await flush();
+    const createDomItem = () => ({
+      id: "chatgpt-helper-question-pending-1",
+      messageId: null,
+      title: "你好",
+      fullText: "你好",
+      branchIndex: null,
+      element: context.dom.window.document.createElement("article"),
+      source: "dom"
+    });
+
+    const otherItem = createDomItem();
+    context.setDomItems([otherItem]);
+    context.dom.window.history.pushState({}, "", "/c/other-conversation");
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    await flush();
+
+    const restoredItem = createDomItem();
+    context.setDomItems([restoredItem]);
+    context.dom.window.history.pushState({}, "", "/c/old-conversation");
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    context.emitQuestions([restoredItem]);
+    await flush();
+
+    const state = context.app.getState();
+    assert.equal(state.items.length, 1);
+    assert.equal(state.items[0].messageId, "old-conversation");
+    assert.equal(state.items[0].element, restoredItem.element);
+    assert.equal("fullText" in state.items[0], false);
+  } finally {
+    pendingRefresh.reject(new Error("结束挂起请求"));
     context.cleanup();
   }
 });

@@ -151,3 +151,148 @@ test("标题规范化过滤说话者标签并按 Unicode 码点截断", () => {
   assert.equal(api.normalizeQuestionTitle("你说：  一个   问题\n后续"), "一个 问题");
   assert.equal(Array.from(api.normalizeQuestionTitle("问".repeat(140))).length, 120);
 });
+
+function conversationPayload(text = "问题") {
+  return {
+    current_node: "u1",
+    mapping: {
+      u1: {
+        parent: null,
+        message: message("m1", "user", [text])
+      }
+    }
+  };
+}
+
+test("使用同源凭据读取会话", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return Response.json(conversationPayload());
+  };
+
+  const result = await api.loadConversation("conversation/id", { fetchImpl });
+  assert.equal(result.questions.length, 1);
+  assert.equal(
+    calls[0].url,
+    "/backend-api/conversation/conversation%2Fid"
+  );
+  assert.equal(calls[0].init.credentials, "include");
+});
+
+test("认证失败后获取会话令牌并只重试一次", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return new Response("", { status: 401 });
+    }
+    if (url === "/api/auth/session") {
+      return Response.json({ accessToken: "memory-only-token" });
+    }
+    return Response.json(conversationPayload());
+  };
+
+  const result = await api.loadConversation("conversation-id", { fetchImpl });
+  assert.equal(result.questions.length, 1);
+  assert.equal(calls.length, 3);
+  assert.equal(
+    calls[2].init.headers.Authorization,
+    "Bearer memory-only-token"
+  );
+});
+
+test("第二次请求仍失败时返回受控状态码且不泄漏正文", async () => {
+  const api = loadApi();
+  let callCount = 0;
+  const fetchImpl = async (url) => {
+    callCount += 1;
+    if (url === "/api/auth/session") {
+      return Response.json({ accessToken: "secret-test-token" });
+    }
+    return new Response("private-response-body", { status: 403 });
+  };
+
+  await assert.rejects(
+    api.loadConversation("conversation-id", { fetchImpl }),
+    (error) => {
+      assert.equal(error.name, "ConversationRequestError");
+      assert.equal(error.status, 403);
+      assert.equal(error.message.includes("secret-test-token"), false);
+      assert.equal(error.message.includes("private-response-body"), false);
+      return true;
+    }
+  );
+  assert.equal(callCount, 3);
+});
+
+test("404 响应保留明确状态码", async () => {
+  const api = loadApi();
+  await assert.rejects(
+    api.loadConversation("missing", {
+      fetchImpl: async () => new Response("", { status: 404 })
+    }),
+    (error) => error.name === "ConversationRequestError" && error.status === 404
+  );
+});
+
+test("外部取消信号会传递给请求", async () => {
+  const api = loadApi();
+  const controller = new AbortController();
+  const fetchImpl = async (_url, init) => {
+    controller.abort(new DOMException("用户取消", "AbortError"));
+    await new Promise((resolve, reject) => {
+      if (init.signal.aborted) {
+        reject(init.signal.reason);
+        return;
+      }
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), {
+        once: true
+      });
+    });
+  };
+
+  await assert.rejects(
+    api.loadConversation("conversation-id", {
+      fetchImpl,
+      signal: controller.signal
+    }),
+    { name: "AbortError" }
+  );
+});
+
+test("请求达到时限后被取消", async () => {
+  const api = loadApi();
+  const fetchImpl = async (_url, init) => {
+    await new Promise((resolve, reject) => {
+      init.signal.addEventListener("abort", () => reject(init.signal.reason), {
+        once: true
+      });
+    });
+  };
+
+  await assert.rejects(
+    api.loadConversation("conversation-id", {
+      fetchImpl,
+      timeoutMs: 20
+    }),
+    { name: "AbortError" }
+  );
+});
+
+test("请求代次控制器中止旧请求并拒绝过期代次", () => {
+  const api = loadApi();
+  const gate = api.createRequestGate();
+  const first = gate.next();
+  const second = gate.next();
+
+  assert.equal(first.signal.aborted, true);
+  assert.equal(gate.isCurrent(first.generation), false);
+  assert.equal(gate.isCurrent(second.generation), true);
+
+  gate.abort();
+  assert.equal(second.signal.aborted, true);
+  assert.equal(gate.isCurrent(second.generation), false);
+});

@@ -1,10 +1,20 @@
 (function initConversationApi(global) {
   const NAMESPACE = "__CHATGPT_HELPER__";
+  const SESSION_ENDPOINT = "/api/auth/session";
+  const CONVERSATION_ENDPOINT_PREFIX = "/backend-api/conversation/";
 
   class ConversationResponseError extends Error {
     constructor(message) {
       super(message);
       this.name = "ConversationResponseError";
+    }
+  }
+
+  class ConversationRequestError extends Error {
+    constructor(status) {
+      super(`会话请求失败（HTTP ${status}）`);
+      this.name = "ConversationRequestError";
+      this.status = status;
     }
   }
 
@@ -144,12 +154,124 @@
       .filter(Boolean);
   }
 
+  function createLinkedAbortSignal(...signals) {
+    const controller = new AbortController();
+    const cleanups = [];
+
+    signals.filter(Boolean).forEach((source) => {
+      if (source.aborted) {
+        controller.abort(source.reason);
+        return;
+      }
+
+      const onAbort = () => controller.abort(source.reason);
+      source.addEventListener("abort", onAbort, { once: true });
+      cleanups.push(() => source.removeEventListener("abort", onAbort));
+    });
+
+    return {
+      signal: controller.signal,
+      cleanup() {
+        cleanups.splice(0).forEach((cleanup) => cleanup());
+      }
+    };
+  }
+
+  async function fetchSession(fetchImpl, signal) {
+    const response = await fetchImpl(SESSION_ENDPOINT, {
+      credentials: "include",
+      signal
+    });
+
+    if (!response.ok) {
+      return { accessToken: null };
+    }
+
+    const payload = await response.json();
+    return {
+      accessToken:
+        typeof payload?.accessToken === "string"
+          ? payload.accessToken
+          : null
+    };
+  }
+
+  async function loadConversation(conversationId, options = {}) {
+    if (!conversationId) {
+      throw new ConversationRequestError(400);
+    }
+
+    const fetchImpl = options.fetchImpl || global.fetch.bind(global);
+    const timeoutMs = Number(options.timeoutMs) || 8000;
+    const timeoutController = new AbortController();
+    const timeoutId = global.setTimeout(() => timeoutController.abort(), timeoutMs);
+    const linked = createLinkedAbortSignal(options.signal, timeoutController.signal);
+    const signal = linked.signal;
+
+    try {
+      const path = `${CONVERSATION_ENDPOINT_PREFIX}${encodeURIComponent(conversationId)}`;
+      let response = await fetchImpl(path, {
+        credentials: "include",
+        signal
+      });
+
+      if (response.status === 401 || response.status === 403) {
+        const session = await fetchSession(fetchImpl, signal);
+        response = await fetchImpl(path, {
+          credentials: "include",
+          signal,
+          headers: session.accessToken
+            ? { Authorization: `Bearer ${session.accessToken}` }
+            : undefined
+        });
+      }
+
+      if (!response.ok) {
+        throw new ConversationRequestError(response.status);
+      }
+
+      const payload = await response.json();
+      const branch = buildActiveBranch(payload);
+      return {
+        branch,
+        questions: buildQuestionItems(branch)
+      };
+    } finally {
+      global.clearTimeout(timeoutId);
+      linked.cleanup();
+    }
+  }
+
+  function createRequestGate() {
+    let generation = 0;
+    let controller = null;
+
+    return {
+      next() {
+        controller?.abort();
+        controller = new AbortController();
+        generation += 1;
+        return { generation, signal: controller.signal };
+      },
+      isCurrent(value) {
+        return value === generation && !controller?.signal.aborted;
+      },
+      abort() {
+        controller?.abort();
+        generation += 1;
+      }
+    };
+  }
+
   global[NAMESPACE] = global[NAMESPACE] || {};
   global[NAMESPACE].conversationApi = {
+    ConversationRequestError,
     ConversationResponseError,
     buildActiveBranch,
     buildQuestionItems,
+    createRequestGate,
     getConversationId,
+    loadConversation,
     normalizeQuestionTitle
   };
 })(globalThis);

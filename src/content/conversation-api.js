@@ -38,6 +38,15 @@
     return Array.from(normalized).slice(0, 120).join("");
   }
 
+  function normalizeMessageText(rawText) {
+    return String(rawText || "")
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .join("\n");
+  }
+
   function extractPartText(part) {
     if (typeof part === "string") {
       return part;
@@ -135,7 +144,7 @@
     return branch
       .filter((entry) => entry?.role === "user")
       .map((entry) => {
-        const fullText = extractMessageText(entry.message);
+        const fullText = normalizeMessageText(extractMessageText(entry.message));
         const title = normalizeQuestionTitle(fullText);
         if (!title) {
           return null;
@@ -146,12 +155,64 @@
           messageId: entry.messageId,
           nodeId: entry.nodeId,
           title,
+          fullText,
           branchIndex: entry.branchIndex,
           element: null,
           source: "api"
         };
       })
       .filter(Boolean);
+  }
+
+  function mergeQuestionItems(apiItems, domItems) {
+    const canonical = Array.isArray(apiItems)
+      ? apiItems.map((item) => ({ ...item }))
+      : [];
+    const rendered = Array.isArray(domItems) ? domItems : [];
+    const byMessageId = new Map(
+      canonical
+        .filter((item) => item.messageId)
+        .map((item) => [item.messageId, item])
+    );
+    const matchedIds = new Set();
+
+    rendered.forEach((domItem) => {
+      const match = domItem.messageId
+        ? byMessageId.get(domItem.messageId)
+        : null;
+      if (!match) {
+        return;
+      }
+
+      match.element = domItem.element || null;
+      matchedIds.add(match.id);
+    });
+
+    const unmatchedTail = canonical.slice(Math.max(canonical.length - 4, 0));
+    const pending = rendered.filter((domItem) => {
+      if (domItem.messageId && byMessageId.has(domItem.messageId)) {
+        return false;
+      }
+
+      const normalizedDomText = normalizeMessageText(domItem.fullText);
+      const textMatch = unmatchedTail.find((item) => {
+        return (
+          !matchedIds.has(item.id) &&
+          item.fullText &&
+          item.fullText === normalizedDomText
+        );
+      });
+
+      if (textMatch) {
+        textMatch.element = domItem.element || null;
+        matchedIds.add(textMatch.id);
+        return false;
+      }
+
+      return true;
+    });
+
+    return canonical.concat(pending.map((item) => ({ ...item })));
   }
 
   function createLinkedAbortSignal(...signals) {
@@ -272,6 +333,8 @@
     createRequestGate,
     getConversationId,
     loadConversation,
+    mergeQuestionItems,
+    normalizeMessageText,
     normalizeQuestionTitle
   };
 })(globalThis);

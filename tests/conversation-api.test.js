@@ -296,3 +296,99 @@ test("请求代次控制器中止旧请求并拒绝过期代次", () => {
   assert.equal(second.signal.aborted, true);
   assert.equal(gate.isCurrent(second.generation), false);
 });
+
+test("通过消息 ID 将 DOM 元素绑定到权威问题且不修改输入", () => {
+  const api = loadApi();
+  const element = { marker: "rendered" };
+  const canonical = [
+    {
+      id: "question-m1",
+      messageId: "m1",
+      title: "问题",
+      fullText: "问题全文",
+      element: null
+    }
+  ];
+  const domItems = [
+    {
+      id: "dom-1",
+      messageId: "m1",
+      title: "问题",
+      fullText: "问题全文",
+      element
+    }
+  ];
+
+  const merged = api.mergeQuestionItems(canonical, domItems);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].element, element);
+  assert.equal(canonical[0].element, null);
+});
+
+test("没有消息 ID 时只在末尾近邻中按规范化全文匹配", () => {
+  const api = loadApi();
+  const element = { marker: "pending-rendered" };
+  const canonical = Array.from({ length: 6 }, (_, index) => ({
+    id: `question-m${index}`,
+    messageId: `m${index}`,
+    title: `问题 ${index}`,
+    fullText: index === 5 ? "问题全文\n第二行" : `内容 ${index}`,
+    element: null
+  }));
+  const domItems = [
+    {
+      id: "dom-pending",
+      messageId: null,
+      title: "问题全文",
+      fullText: "  问题全文  \n  第二行 ",
+      element
+    }
+  ];
+
+  const merged = api.mergeQuestionItems(canonical, domItems);
+  assert.equal(merged.length, 6);
+  assert.equal(merged[5].element, element);
+});
+
+test("相同标题但全文不同的问题保持独立", () => {
+  const api = loadApi();
+  const canonical = [
+    {
+      id: "question-m1",
+      messageId: "m1",
+      title: "同一标题",
+      fullText: "同一标题\n第一条全文",
+      element: null
+    },
+    {
+      id: "question-m2",
+      messageId: "m2",
+      title: "同一标题",
+      fullText: "同一标题\n第二条全文",
+      element: null
+    }
+  ];
+  const pending = {
+    id: "dom-3",
+    messageId: null,
+    title: "同一标题",
+    fullText: "同一标题\n第三条全文",
+    element: { marker: "third" },
+    source: "dom"
+  };
+
+  const merged = api.mergeQuestionItems(canonical, [pending]);
+  assert.equal(merged.length, 3);
+  assert.equal(merged[2].id, "dom-3");
+});
+
+test("待同步 DOM 问题按输入顺序追加", () => {
+  const api = loadApi();
+  const pending = [
+    { id: "dom-1", messageId: null, fullText: "新问题 1" },
+    { id: "dom-2", messageId: null, fullText: "新问题 2" }
+  ];
+  const merged = api.mergeQuestionItems([], pending);
+  assert.deepEqual(merged.map((item) => item.id), ["dom-1", "dom-2"]);
+  assert.notEqual(merged[0], pending[0]);
+});

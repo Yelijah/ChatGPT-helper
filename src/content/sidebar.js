@@ -13,6 +13,8 @@
       this.card = null;
       this.list = null;
       this.empty = null;
+      this.status = { kind: "ready", message: "" };
+      this.statusElement = null;
       this.railSegments = [];
     }
 
@@ -38,10 +40,15 @@
       const list = document.createElement("div");
       list.className = "chatgpt-helper-sidebar__list";
 
+      const status = document.createElement("div");
+      status.className = "chatgpt-helper-sidebar__status";
+      status.hidden = true;
+
       const empty = document.createElement("div");
       empty.className = "chatgpt-helper-sidebar__empty";
       empty.textContent = "当前会话暂无可索引问题";
 
+      card.appendChild(status);
       card.appendChild(list);
       card.appendChild(empty);
       root.appendChild(hotspot);
@@ -78,7 +85,9 @@
       this.card = card;
       this.list = list;
       this.empty = empty;
+      this.statusElement = status;
       this.setExpanded(false);
+      this.setStatus(this.status);
 
       return this;
     }
@@ -89,6 +98,18 @@
       if (this.root) {
         this.root.dataset.expanded = this.expanded ? "true" : "false";
       }
+    }
+
+    setStatus(status) {
+      this.status = status || { kind: "ready", message: "" };
+
+      if (!this.root || !this.statusElement) {
+        return;
+      }
+
+      this.root.dataset.status = this.status.kind || "ready";
+      this.statusElement.textContent = this.status.message || "";
+      this.statusElement.hidden = !this.status.message;
     }
 
     buildRailSegments() {
@@ -120,13 +141,14 @@
       return segments;
     }
 
-    render(items, activeId) {
+    render(items, activeId, status) {
       if (!this.root || !this.rail || !this.list || !this.empty) {
         return;
       }
 
       this.items = Array.isArray(items) ? items.slice() : [];
       this.activeId = activeId || null;
+      this.setStatus(status || this.status);
       this.railSegments = this.buildRailSegments();
       this.rail.replaceChildren();
       this.list.replaceChildren();

@@ -11,6 +11,22 @@ function message(id, role, parts) {
   return { id, author: { role }, content: { parts } };
 }
 
+function apiMessage(id, role, text) {
+  return {
+    id,
+    author: { role, name: null, metadata: {} },
+    create_time: null,
+    update_time: null,
+    content: { content_type: "text", parts: [text] },
+    status: "finished_successfully",
+    end_turn: role !== "assistant",
+    weight: 1,
+    metadata: {},
+    recipient: "all",
+    channel: null
+  };
+}
+
 test("从普通和项目会话路径提取会话 ID", () => {
   const api = loadApi();
   assert.equal(api.getConversationId("/c/conversation-1"), "conversation-1");
@@ -155,15 +171,180 @@ test("标题规范化过滤说话者标签并按 Unicode 码点截断", () => {
 
 function conversationPayload(text = "问题") {
   return {
-    current_node: "u1",
-    mapping: {
-      u1: {
-        parent: null,
-        message: message("m1", "user", [text])
-      }
+    messages: [apiMessage("m1", "user", text)],
+    current_node: "m1",
+    page_info: {
+      start_cursor: null,
+      end_cursor: null,
+      has_previous_page: false,
+      has_next_page: false
+    },
+    moderation_results: [],
+    safe_urls: [],
+    blocked_urls: []
+  };
+}
+
+function bootstrapDocument(overrides = {}) {
+  const payload = {
+    authStatus: "logged_in",
+    session: {
+      accessToken: "bootstrap-access-token",
+      account: { id: "account-id" },
+      expires: "2099-01-01T00:00:00.000Z",
+      sessionToken: "must-not-be-retained"
+    },
+    sessionId: "session-id",
+    ...overrides
+  };
+  return {
+    documentElement: {},
+    querySelector() {
+      return { textContent: JSON.stringify(payload) };
     }
   };
 }
+
+test("只从原生 client-bootstrap 提取请求所需认证字段", () => {
+  const api = loadApi();
+  const auth = api.readClientBootstrapAuth(bootstrapDocument());
+
+  assert.deepEqual(auth, {
+    accessToken: "bootstrap-access-token",
+    accountId: "account-id",
+    sessionId: "session-id"
+  });
+  assert.equal("sessionToken" in auth, false);
+});
+
+test("等待原生 client-bootstrap 出现后再返回认证字段", async () => {
+  const api = loadApi();
+  let script = null;
+  let notifyMutation = null;
+  let disconnected = false;
+  const documentRef = {
+    documentElement: {},
+    querySelector() {
+      return script;
+    }
+  };
+  class FakeMutationObserver {
+    constructor(callback) {
+      notifyMutation = callback;
+    }
+    observe() {}
+    disconnect() {
+      disconnected = true;
+    }
+  }
+
+  const waiting = api.waitForClientBootstrapAuth({
+    documentRef,
+    MutationObserverImpl: FakeMutationObserver,
+    timeoutMs: 100
+  });
+  script = bootstrapDocument().querySelector();
+  notifyMutation();
+
+  assert.equal((await waiting).accessToken, "bootstrap-access-token");
+  assert.equal(disconnected, true);
+});
+
+test("首次会话请求直接复用原生启动认证且不请求 session 接口", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return Response.json(conversationPayload());
+  };
+
+  await api.loadConversation("conversation-id", {
+    fetchImpl,
+    documentRef: bootstrapDocument()
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url.includes("/api/auth/session"), false);
+  assert.equal(calls[0].init.headers.Authorization, "Bearer bootstrap-access-token");
+  assert.equal(calls[0].init.headers["chatgpt-account-id"], "account-id");
+  assert.equal(calls[0].init.headers["oai-session-id"], "session-id");
+});
+
+test("同一页面后续会话请求复用内存中的原生认证", async () => {
+  const api = loadApi();
+  let bootstrapReads = 0;
+  const documentRef = bootstrapDocument();
+  const originalQuerySelector = documentRef.querySelector;
+  documentRef.querySelector = (...args) => {
+    bootstrapReads += 1;
+    return originalQuerySelector(...args);
+  };
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    return Response.json(conversationPayload());
+  };
+
+  await api.loadConversation("conversation-1", { fetchImpl, documentRef });
+  await api.loadConversation("conversation-2", { fetchImpl, documentRef });
+
+  assert.equal(bootstrapReads, 1);
+  assert.equal(calls.length, 2);
+  assert.equal(calls.every((call) => call.init.headers.Authorization === "Bearer bootstrap-access-token"), true);
+});
+
+test("原生启动令牌失效时才调用 session 接口并重试一次", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return new Response("", { status: 401 });
+    }
+    if (url === "/api/auth/session") {
+      return Response.json({ accessToken: "refreshed-token" });
+    }
+    return Response.json(conversationPayload());
+  };
+
+  await api.loadConversation("conversation-id", {
+    fetchImpl,
+    documentRef: bootstrapDocument()
+  });
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].init.headers.Authorization, "Bearer bootstrap-access-token");
+  assert.equal(calls[1].url, "/api/auth/session");
+  assert.equal(calls[2].init.headers.Authorization, "Bearer refreshed-token");
+  assert.equal(calls[2].init.headers["chatgpt-account-id"], undefined);
+});
+
+test("降级刷新成功后的令牌继续在当前页面内存中复用", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return new Response("", { status: 401 });
+    }
+    if (url === "/api/auth/session") {
+      return Response.json({ accessToken: "refreshed-token" });
+    }
+    return Response.json(conversationPayload());
+  };
+
+  await api.loadConversation("conversation-1", {
+    fetchImpl,
+    documentRef: bootstrapDocument()
+  });
+  await api.loadConversation("conversation-2", {
+    fetchImpl,
+    documentRef: bootstrapDocument()
+  });
+
+  assert.equal(calls.filter((call) => call.url === "/api/auth/session").length, 1);
+  assert.equal(calls.at(-1).init.headers.Authorization, "Bearer refreshed-token");
+});
 
 test("使用同源凭据读取会话", async () => {
   const api = loadApi();
@@ -183,9 +364,53 @@ test("使用同源凭据读取会话", async () => {
   ]);
   assert.equal(
     calls[0].url,
-    "/backend-api/conversation/conversation%2Fid"
+    "/backend-api/conversations/conversation%2Fid?include_has_versions=true&num_turns=100"
   );
   assert.equal(calls[0].init.credentials, "include");
+});
+
+test("按 page_info 向前分页并只保留当前消息列表中的用户提问", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return Response.json({
+        messages: [apiMessage("m3", "user", "第三问"), apiMessage("m4", "assistant", "答复")],
+        current_node: "m4",
+        page_info: { start_cursor: "cursor-2", end_cursor: "cursor-4", has_previous_page: true, has_next_page: false },
+        moderation_results: [], safe_urls: [], blocked_urls: []
+      });
+    }
+    return Response.json({
+      messages: [apiMessage("m1", "user", "第一问"), apiMessage("m2", "assistant", "答复 1"), apiMessage("m3", "user", "第三问")],
+      page_info: { start_cursor: null, end_cursor: "cursor-2", has_previous_page: false, has_next_page: false },
+      moderation_results: [], safe_urls: [], blocked_urls: []
+    });
+  };
+
+  const result = await api.loadConversation("conversation/id", { fetchImpl });
+  assert.deepEqual(result.branch.map((entry) => entry.messageId), ["m1", "m2", "m3", "m4"]);
+  assert.deepEqual(result.questions.map((item) => item.messageId), ["m1", "m3"]);
+  assert.deepEqual(result.branch.map((entry) => entry.branchIndex), [0, 1, 2, 3]);
+  assert.equal(calls[1].url, "/backend-api/conversations/conversation%2Fid/messages?before=cursor-2&include_has_versions=true&num_turns=100");
+});
+
+test("重复分页游标被拒绝，避免请求死循环", async () => {
+  const api = loadApi();
+  let callCount = 0;
+  const fetchImpl = async (url) => {
+    callCount += 1;
+    if (callCount === 1) return Response.json({
+      messages: [apiMessage("m1", "user", "问题")], current_node: "m1",
+      page_info: { start_cursor: "same", end_cursor: "same", has_previous_page: true, has_next_page: false }
+    });
+    return Response.json({
+      messages: [], page_info: { start_cursor: "same", end_cursor: "same", has_previous_page: true, has_next_page: false }
+    });
+  };
+  await assert.rejects(api.loadConversation("conversation-id", { fetchImpl }), { name: "ConversationResponseError" });
+  assert.equal(callCount, 2);
 });
 
 test("缓存模型不保留完整问题正文或 DOM 引用", () => {
@@ -322,6 +547,37 @@ test("404 响应保留明确状态码", async () => {
     }),
     (error) => error.name === "ConversationRequestError" && error.status === 404
   );
+});
+
+test("404 conversation_inaccessible 后刷新会话并重试一次", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) {
+      return Response.json({ detail: { code: "conversation_inaccessible" } }, { status: 404 });
+    }
+    if (url === "/api/auth/session") return Response.json({ accessToken: "temporary-token" });
+    return Response.json(conversationPayload());
+  };
+  const result = await api.loadConversation("conversation-id", { fetchImpl });
+  assert.equal(result.questions.length, 1);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].init.headers.Authorization, "Bearer temporary-token");
+});
+
+test("兼容顶层 conversation_inaccessible 错误码", async () => {
+  const api = loadApi();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (calls.length === 1) return Response.json({ code: "conversation_inaccessible" }, { status: 404 });
+    if (url === "/api/auth/session") return Response.json({ accessToken: "temporary-token" });
+    return Response.json(conversationPayload());
+  };
+  await api.loadConversation("conversation-id", { fetchImpl });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[2].init.headers.Authorization, "Bearer temporary-token");
 });
 
 test("外部取消信号会传递给请求", async () => {

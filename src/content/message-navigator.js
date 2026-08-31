@@ -46,13 +46,35 @@
     return nearest;
   }
 
+  function calculateScrollDelta(target, anchor, metrics) {
+    const direction = target.branchIndex < anchor.branchIndex ? -1 : 1;
+    const branchDistance = Math.abs(target.branchIndex - anchor.branchIndex);
+    const viewportStep = Math.max((Number(metrics?.clientHeight) || 0) * 0.8, 160);
+    const stepMultiplier = Math.min(Math.max(Math.ceil(branchDistance / 8), 1), 4);
+    return direction * viewportStep * stepMultiplier;
+  }
+
+  function getRenderedMessageSignature(entries) {
+    return (Array.isArray(entries) ? entries : [])
+      .map((entry) => entry?.messageId)
+      .filter(Boolean)
+      .map(String)
+      .sort()
+      .join("|");
+  }
+
   async function navigateToMessage(options = {}) {
     const branch = Array.isArray(options.branch) ? options.branch : [];
     const target = options.target || null;
     const adapter = options.adapter;
     const signal = options.signal;
-    const timeoutMs = Math.max(Number(options.timeoutMs) || 10000, 1);
+    const timeoutMs = Math.max(Number(options.timeoutMs) || 30000, 1);
     const settleMs = Math.max(Number(options.settleMs) || 250, 1);
+    const minSettleMs = Math.min(
+      Math.max(Number(options.minSettleMs) || 120, 0),
+      settleMs
+    );
+    const boundaryIdleMs = Math.max(Number(options.boundaryIdleMs) || 3000, 1);
     const now = typeof options.now === "function" ? options.now : Date.now;
 
     if (!adapter || !target) {
@@ -76,21 +98,18 @@
     }
 
     const deadline = now() + timeoutMs;
-    let boundaryCount = 0;
-    let lastTop = null;
+    let lastProgressAt = now();
     let usedInitialRatio = false;
 
     while (now() < deadline) {
       throwIfAborted(signal);
       const renderedEntries = adapter.getRenderedMessageEntries();
+      const beforeMessageSignature = getRenderedMessageSignature(renderedEntries);
       const anchor = chooseNearestAnchor(branch, target, renderedEntries);
       const before = adapter.getScrollMetrics();
 
       if (anchor) {
-        const direction = target.branchIndex < anchor.branchIndex ? -1 : 1;
-        const delta =
-          direction * Math.max((Number(before.clientHeight) || 0) * 0.8, 160);
-        adapter.scrollByAmount(delta);
+        adapter.scrollByAmount(calculateScrollDelta(target, anchor, before));
       } else if (!usedInitialRatio) {
         const denominator = Math.max(branch.length - 1, 1);
         adapter.scrollToRatio(target.branchIndex / denominator);
@@ -101,7 +120,10 @@
       const remaining = Math.max(deadline - now(), 1);
       await adapter.waitForMessageRender({
         signal,
-        timeoutMs: Math.min(settleMs, remaining)
+        timeoutMs: Math.min(settleMs, remaining),
+        minSettleMs,
+        targetMessageId: target.messageId,
+        previousMessageIds: renderedEntries.map((entry) => entry.messageId)
       });
       throwIfAborted(signal);
 
@@ -112,14 +134,24 @@
       }
 
       const after = adapter.getScrollMetrics();
+      const afterMessageSignature = getRenderedMessageSignature(
+        adapter.getRenderedMessageEntries()
+      );
       const atBoundary = after.top <= 0 || after.top >= after.maxTop;
-      const unchanged =
-        Math.abs(after.top - before.top) < 1 ||
-        (lastTop !== null && Math.abs(after.top - lastTop) < 1);
-      boundaryCount = atBoundary && unchanged ? boundaryCount + 1 : 0;
-      lastTop = after.top;
+      const positionChanged = Math.abs(after.top - before.top) >= 1;
+      const geometryChanged = Math.abs(after.maxTop - before.maxTop) >= 1;
+      const messagesChanged = afterMessageSignature !== beforeMessageSignature;
+      const observedAt = now();
 
-      if (boundaryCount >= 3) {
+      if (positionChanged || geometryChanged || messagesChanged) {
+        lastProgressAt = observedAt;
+      }
+
+      if (
+        atBoundary &&
+        !positionChanged &&
+        observedAt - lastProgressAt >= boundaryIdleMs
+      ) {
         return { status: "not-rendered" };
       }
     }
@@ -129,7 +161,9 @@
 
   global[NAMESPACE] = global[NAMESPACE] || {};
   global[NAMESPACE].messageNavigator = {
+    calculateScrollDelta,
     chooseNearestAnchor,
+    getRenderedMessageSignature,
     navigateToMessage
   };
 })(globalThis);

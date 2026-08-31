@@ -316,13 +316,14 @@ test("跨路由相同文本的新 DOM 节点仍可作为降级目录", async () 
 test("接口失败时保留 DOM 目录并显示降级状态", async () => {
   const context = installApp({
     async loadConversation() {
-      throw new Error("模拟网络不可用");
+      throw new TypeError("模拟网络不可用");
     }
   });
   try {
     await flush();
     const latest = context.renderCalls.at(-1);
     assert.equal(latest.status.kind, "degraded");
+    assert.equal(latest.status.message, "完整目录同步失败（网络请求失败），当前显示页面内消息");
     assert.deepEqual(latest.items.map((item) => item.messageId), ["dom-message"]);
   } finally {
     context.cleanup();
@@ -342,6 +343,9 @@ test("点击未渲染问题时显示定位状态并调用定位器", async () =>
     context.getSidebarOptions().onSelect(item);
     assert.equal(context.renderCalls.at(-1).status.kind, "navigating");
     assert.equal(context.navigationCalls.length, 1);
+    assert.equal(context.navigationCalls[0].timeoutMs, 30000);
+    assert.equal(context.navigationCalls[0].minSettleMs, 120);
+    assert.equal(context.navigationCalls[0].boundaryIdleMs, 3000);
 
     navigation.resolve({ status: "not-rendered" });
     await flush();
@@ -418,6 +422,30 @@ test("手动滚动会取消定位并立即释放活动锁", async () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(signal.aborted, true);
     assert.equal(context.app.getState().activeLockId, null);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("宿主延迟触发的程序化滚动事件不会误取消定位", async () => {
+  const navigation = deferred();
+  let navigationSignal = null;
+  const context = installApp({
+    navigateToMessage(options) {
+      navigationSignal = options.signal;
+      options.adapter.scrollByAmount(400);
+      return navigation.promise;
+    }
+  });
+  try {
+    await flush();
+    context.getSidebarOptions().onSelect(context.app.getState().items[0]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    context.dom.window.dispatchEvent(new context.dom.window.Event("scroll"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(navigationSignal.aborted, false);
+    navigation.resolve({ status: "found", element: null });
+    await flush();
   } finally {
     context.cleanup();
   }

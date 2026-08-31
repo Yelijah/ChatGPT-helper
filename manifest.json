@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Question Navigator",
-  "version": "0.2.0",
+  "version": "0.2.4",
   "description": "展示 ChatGPT 当前活动分支的完整用户问题目录，并支持自动加载、定位跳转与滚动高亮。",
   "icons": {
     "16": "assets/icon-16.png",

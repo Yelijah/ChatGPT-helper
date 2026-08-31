@@ -410,9 +410,7 @@
       `[data-message-id='${CSS.escape(String(messageId))}']`
     );
     const element = matched instanceof HTMLElement ? findTurnContainer(matched) : null;
-    return element?.isConnected && isVisibleConversationBlock(element)
-      ? element
-      : null;
+    return element?.isConnected ? element : null;
   }
 
   function getRenderedMessageEntries() {
@@ -625,6 +623,16 @@
     const root = getConversationRoot() || document.body;
     const signal = options.signal;
     const timeoutMs = Math.max(Number(options.timeoutMs) || 250, 0);
+    const minSettleMs = Math.min(
+      Math.max(Number(options.minSettleMs) || 0, 0),
+      timeoutMs
+    );
+    const targetMessageId = options.targetMessageId
+      ? String(options.targetMessageId)
+      : null;
+    const previousMessageIds = Array.isArray(options.previousMessageIds)
+      ? options.previousMessageIds.map(String).sort().join("|")
+      : null;
 
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
@@ -638,7 +646,34 @@
 
       let settled = false;
       let timeoutId = 0;
-      const observer = new MutationObserver(() => finish("mutation"));
+      let minimumTimerId = 0;
+      let pendingReason = null;
+      const observer = new MutationObserver(() => {
+        if (targetMessageId) {
+          const target = root.querySelector(
+            `[data-message-id='${CSS.escape(targetMessageId)}']`
+          );
+          if (target) {
+            finishAfterMinimum("target");
+            return;
+          }
+        }
+
+        if (previousMessageIds !== null) {
+          const nextMessageIds = Array.from(root.querySelectorAll("[data-message-id]"))
+            .filter((node) => !node.closest(".chatgpt-helper-sidebar, .chatgpt-helper-message-outline"))
+            .map((node) => node.getAttribute("data-message-id"))
+            .filter(Boolean)
+            .sort()
+            .join("|");
+          if (nextMessageIds !== previousMessageIds) {
+            finishAfterMinimum("messages");
+          }
+          return;
+        }
+
+        finishAfterMinimum("mutation");
+      });
       const onAbort = () => {
         finish(
           "abort",
@@ -653,7 +688,27 @@
         if (timeoutId) {
           global.clearTimeout(timeoutId);
         }
+        if (minimumTimerId) {
+          global.clearTimeout(minimumTimerId);
+        }
         signal?.removeEventListener("abort", onAbort);
+      }
+
+      function finishAfterMinimum(reason) {
+        if (reason === "target" || !pendingReason) {
+          pendingReason = reason;
+        }
+        const remainingSettleMs = minSettleMs - (Date.now() - startedAt);
+        if (remainingSettleMs <= 0) {
+          finish(pendingReason);
+          return;
+        }
+        if (!minimumTimerId) {
+          minimumTimerId = global.setTimeout(
+            () => finish(pendingReason),
+            remainingSettleMs
+          );
+        }
       }
 
       function finish(reason, error) {
@@ -669,6 +724,7 @@
         }
       }
 
+      const startedAt = Date.now();
       observer.observe(root, { childList: true, subtree: true });
       signal?.addEventListener("abort", onAbort, { once: true });
       timeoutId = global.setTimeout(() => finish("timeout"), timeoutMs);

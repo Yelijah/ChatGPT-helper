@@ -1,7 +1,11 @@
 (function initConversationApi(global) {
   const NAMESPACE = "__CHATGPT_HELPER__";
   const SESSION_ENDPOINT = "/api/auth/session";
-  const CONVERSATION_ENDPOINT_PREFIX = "/backend-api/conversation/";
+  const CONVERSATION_ENDPOINT_PREFIX = "/backend-api/conversations/";
+  const PAGE_SIZE = 100;
+  const MAX_PAGE_COUNT = 100;
+  const CLIENT_BOOTSTRAP_SELECTOR = "#client-bootstrap[type='application/json']";
+  let cachedClientAuth = null;
   const FINGERPRINT_SALT = (() => {
     const values = new Uint32Array(2);
     if (global.crypto?.getRandomValues) {
@@ -21,10 +25,11 @@
   }
 
   class ConversationRequestError extends Error {
-    constructor(status) {
-      super(`会话请求失败（HTTP ${status}）`);
+    constructor(status, code = null) {
+      super(`会话请求失败（HTTP ${status}${code ? `，${code}` : ""}）`);
       this.name = "ConversationRequestError";
       this.status = status;
+      this.code = code;
     }
   }
 
@@ -178,6 +183,59 @@
     }));
   }
 
+  function assertPaginatedConversationPayload(payload, { initial = false } = {}) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new ConversationResponseError("会话响应不是对象");
+    }
+    if (!Array.isArray(payload.messages)) {
+      throw new ConversationResponseError("会话响应缺少 messages");
+    }
+    if (!payload.page_info || typeof payload.page_info !== "object") {
+      throw new ConversationResponseError("会话响应缺少 page_info");
+    }
+    if (typeof payload.page_info.has_previous_page !== "boolean") {
+      throw new ConversationResponseError("会话响应包含无效分页信息");
+    }
+    if (payload.page_info.has_previous_page &&
+      (typeof payload.page_info.start_cursor !== "string" || !payload.page_info.start_cursor)) {
+      throw new ConversationResponseError("会话响应缺少历史分页游标");
+    }
+    if (initial && payload.messages.length > 0) {
+      if (typeof payload.current_node !== "string" || !payload.current_node) {
+        throw new ConversationResponseError("会话响应缺少 current_node");
+      }
+      if (!payload.messages.some((message) => message?.id === payload.current_node)) {
+        throw new ConversationResponseError("current_node 未指向有效消息");
+      }
+    }
+    const ids = new Set();
+    payload.messages.forEach((message) => {
+      if (!message || typeof message !== "object" || typeof message.id !== "string" || !message.id) {
+        throw new ConversationResponseError("会话响应包含无效消息");
+      }
+      if (ids.has(message.id)) {
+        throw new ConversationResponseError("会话响应包含重复消息");
+      }
+      ids.add(message.id);
+      if (typeof message.author?.role !== "string") {
+        throw new ConversationResponseError("会话消息缺少作者角色");
+      }
+    });
+  }
+
+  function buildMessageBranch(messages) {
+    if (!Array.isArray(messages)) {
+      throw new ConversationResponseError("会话消息列表无效");
+    }
+    return messages.map((message, branchIndex) => ({
+      nodeId: message.id,
+      messageId: message.id,
+      role: message.author.role,
+      branchIndex,
+      message
+    }));
+  }
+
   function buildQuestionItems(branch) {
     if (!Array.isArray(branch)) {
       return [];
@@ -318,6 +376,138 @@
     };
   }
 
+  function readClientBootstrapAuth(documentRef = global.document) {
+    if (!documentRef?.querySelector) {
+      return null;
+    }
+
+    const script = documentRef.querySelector(CLIENT_BOOTSTRAP_SELECTOR);
+    if (!script?.textContent) {
+      return null;
+    }
+
+    try {
+      const payload = JSON.parse(script.textContent);
+      const accessToken = payload?.session?.accessToken;
+      if (typeof accessToken !== "string" || !accessToken) {
+        return null;
+      }
+      const expiresAt = Date.parse(payload?.session?.expires || "");
+      if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
+        return null;
+      }
+      return {
+        accessToken,
+        accountId:
+          typeof payload?.session?.account?.id === "string"
+            ? payload.session.account.id
+            : null,
+        sessionId:
+          typeof payload?.sessionId === "string"
+            ? payload.sessionId
+            : null
+      };
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function waitForClientBootstrapAuth(options = {}) {
+    if (cachedClientAuth) {
+      return Promise.resolve({ ...cachedClientAuth });
+    }
+
+    const documentRef = options.documentRef || global.document;
+    const initial = readClientBootstrapAuth(documentRef);
+    if (initial) {
+      cachedClientAuth = initial;
+      return Promise.resolve({ ...initial });
+    }
+    if (!documentRef?.documentElement) {
+      return Promise.resolve(null);
+    }
+
+    const MutationObserverImpl =
+      options.MutationObserverImpl || global.MutationObserver;
+    if (typeof MutationObserverImpl !== "function") {
+      return Promise.resolve(null);
+    }
+
+    const signal = options.signal;
+    const timeoutMs = Math.max(Number(options.timeoutMs) || 1500, 0);
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) {
+        reject(
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("会话请求已取消", "AbortError")
+        );
+        return;
+      }
+
+      let settled = false;
+      let timeoutId = 0;
+      const observer = new MutationObserverImpl(() => {
+        const auth = readClientBootstrapAuth(documentRef);
+        if (auth) {
+          cachedClientAuth = auth;
+          finish(auth);
+        }
+      });
+      const onAbort = () => {
+        finish(
+          null,
+          signal.reason instanceof Error
+            ? signal.reason
+            : new DOMException("会话请求已取消", "AbortError")
+        );
+      };
+
+      function cleanup() {
+        observer.disconnect();
+        if (timeoutId) {
+          global.clearTimeout(timeoutId);
+        }
+        signal?.removeEventListener("abort", onAbort);
+      }
+
+      function finish(auth, error) {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        if (error) {
+          reject(error);
+        } else {
+          resolve(auth ? { ...auth } : null);
+        }
+      }
+
+      observer.observe(documentRef.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timeoutId = global.setTimeout(() => finish(null), timeoutMs);
+    });
+  }
+
+  function createAuthHeaders(auth) {
+    const headers = {};
+    if (auth?.accessToken) {
+      headers.Authorization = `Bearer ${auth.accessToken}`;
+    }
+    if (auth?.accountId) {
+      headers["chatgpt-account-id"] = auth.accountId;
+    }
+    if (auth?.sessionId) {
+      headers["oai-session-id"] = auth.sessionId;
+    }
+    return Object.keys(headers).length ? headers : null;
+  }
+
   async function fetchSession(fetchImpl, signal) {
     const response = await fetchImpl(SESSION_ENDPOINT, {
       credentials: "include",
@@ -337,42 +527,141 @@
     };
   }
 
+  async function readErrorCode(response) {
+    try {
+      const payload = await response.clone().json();
+      const candidates = [
+        payload?.detail?.code,
+        payload?.error?.code,
+        payload?.code,
+        typeof payload?.detail === "string" ? payload.detail : null,
+        typeof payload?.error === "string" ? payload.error : null
+      ];
+      return candidates.find((code) => typeof code === "string" && code) || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function createConversationPagePath(conversationId) {
+    return `${CONVERSATION_ENDPOINT_PREFIX}${encodeURIComponent(conversationId)}?include_has_versions=true&num_turns=${PAGE_SIZE}`;
+  }
+
+  function createOlderMessagesPath(conversationId, cursor) {
+    return `${CONVERSATION_ENDPOINT_PREFIX}${encodeURIComponent(conversationId)}/messages?before=${encodeURIComponent(cursor)}&include_has_versions=true&num_turns=${PAGE_SIZE}`;
+  }
+
   async function loadConversation(conversationId, options = {}) {
     if (!conversationId) {
       throw new ConversationRequestError(400);
     }
 
     const fetchImpl = options.fetchImpl || global.fetch.bind(global);
-    const timeoutMs = Number(options.timeoutMs) || 8000;
+    const timeoutMs = Number(options.timeoutMs) || 20000;
     const timeoutController = new AbortController();
     const timeoutId = global.setTimeout(() => timeoutController.abort(), timeoutMs);
     const linked = createLinkedAbortSignal(options.signal, timeoutController.signal);
     const signal = linked.signal;
 
     try {
-      const path = `${CONVERSATION_ENDPOINT_PREFIX}${encodeURIComponent(conversationId)}`;
-      let response = await fetchImpl(path, {
-        credentials: "include",
-        signal
+      const bootstrapAuth = await waitForClientBootstrapAuth({
+        documentRef: options.documentRef,
+        MutationObserverImpl: options.MutationObserverImpl,
+        signal,
+        timeoutMs: options.bootstrapTimeoutMs
       });
-
-      if (response.status === 401 || response.status === 403) {
-        const session = await fetchSession(fetchImpl, signal);
-        response = await fetchImpl(path, {
+      const auth = {
+        accessToken: bootstrapAuth?.accessToken || null,
+        accountId: bootstrapAuth?.accountId || null,
+        sessionId: bootstrapAuth?.sessionId || null,
+        sessionAttempted: false
+      };
+      const requestPage = async (path) => {
+        const headers = createAuthHeaders(auth);
+        const init = {
           credentials: "include",
           signal,
-          headers: session.accessToken
-            ? { Authorization: `Bearer ${session.accessToken}` }
-            : undefined
+          ...(headers ? { headers } : {})
+        };
+        let response = await fetchImpl(path, init);
+        let code = response.ok ? null : await readErrorCode(response);
+        const shouldRefresh =
+          !response.ok &&
+          !auth.sessionAttempted &&
+          (response.status === 401 || response.status === 403 ||
+            (response.status === 404 && code === "conversation_inaccessible"));
+        if (shouldRefresh) {
+          auth.sessionAttempted = true;
+          cachedClientAuth = null;
+          auth.accountId = null;
+          auth.sessionId = null;
+          const session = await fetchSession(fetchImpl, signal);
+          auth.accessToken = session.accessToken;
+          cachedClientAuth = auth.accessToken
+            ? {
+                accessToken: auth.accessToken,
+                accountId: null,
+                sessionId: null
+              }
+            : null;
+          const retryHeaders = createAuthHeaders(auth);
+          response = await fetchImpl(path, {
+            credentials: "include",
+            signal,
+            ...(retryHeaders ? { headers: retryHeaders } : {})
+          });
+          code = response.ok ? null : await readErrorCode(response);
+          if (
+            !response.ok &&
+            (response.status === 401 || response.status === 403)
+          ) {
+            cachedClientAuth = null;
+          }
+        }
+        if (!response.ok) {
+          throw new ConversationRequestError(response.status, code);
+        }
+        try {
+          return await response.json();
+        } catch (error) {
+          throw new ConversationResponseError("会话响应不是有效 JSON");
+        }
+      };
+
+      const firstPayload = await requestPage(createConversationPagePath(conversationId));
+      assertPaginatedConversationPayload(firstPayload, { initial: true });
+      let messages = firstPayload.messages.slice();
+      let cursor = firstPayload.page_info.has_previous_page
+        ? firstPayload.page_info.start_cursor
+        : null;
+      const seenCursors = new Set();
+      let pageCount = 1;
+      while (cursor) {
+        if (seenCursors.has(cursor)) {
+          throw new ConversationResponseError("会话分页游标未推进");
+        }
+        if (pageCount >= MAX_PAGE_COUNT) {
+          throw new ConversationResponseError("会话分页超过安全上限");
+        }
+        seenCursors.add(cursor);
+        const olderPayload = await requestPage(
+          createOlderMessagesPath(conversationId, cursor)
+        );
+        assertPaginatedConversationPayload(olderPayload);
+        const merged = olderPayload.messages.concat(messages);
+        const ids = new Set();
+        messages = merged.filter((message) => {
+          if (ids.has(message.id)) return false;
+          ids.add(message.id);
+          return true;
         });
+        cursor = olderPayload.page_info.has_previous_page
+          ? olderPayload.page_info.start_cursor
+          : null;
+        pageCount += 1;
       }
 
-      if (!response.ok) {
-        throw new ConversationRequestError(response.status);
-      }
-
-      const payload = await response.json();
-      const parsedBranch = buildActiveBranch(payload);
+      const parsedBranch = buildMessageBranch(messages);
       return {
         branch: parsedBranch.map(({ nodeId, messageId, role, branchIndex }) => ({
           nodeId,
@@ -414,6 +703,7 @@
     ConversationRequestError,
     ConversationResponseError,
     buildActiveBranch,
+    buildMessageBranch,
     buildQuestionItems,
     createConversationCacheEntry,
     createTextFingerprint,
@@ -422,6 +712,8 @@
     loadConversation,
     mergeQuestionItems,
     normalizeMessageText,
-    normalizeQuestionTitle
+    normalizeQuestionTitle,
+    readClientBootstrapAuth,
+    waitForClientBootstrapAuth
   };
 })(globalThis);

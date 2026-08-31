@@ -24,6 +24,7 @@ function createAdapter(renderedIds = []) {
     clientHeight: 500,
     calls: [],
     waitCount: 0,
+    waitOptions: [],
     onWait: null
   };
 
@@ -55,6 +56,7 @@ function createAdapter(renderedIds = []) {
     },
     async waitForMessageRender(options) {
       state.waitCount += 1;
+      state.waitOptions.push(options);
       await state.onWait?.(state.waitCount, options);
     },
     scrollToMessageElement(element) {
@@ -128,6 +130,76 @@ test("目标位于最近锚点之后时向下滚动", async () => {
   assert.equal(adapter.state.calls[0][1] > 0, true);
 });
 
+test("目标距离锚点较远时按距离增大滚动步长", async () => {
+  const navigator = loadNavigator();
+  const branch = Array.from({ length: 40 }, (_, index) => ({
+    messageId: `m${index}`,
+    branchIndex: index
+  }));
+  const adapter = createAdapter(["m39"]);
+  adapter.state.onWait = () => {
+    adapter.state.renderedIds.push("m0");
+  };
+
+  const result = await navigator.navigateToMessage({
+    branch,
+    target: { messageId: "m0", branchIndex: 0 },
+    adapter
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(adapter.state.calls[0][1], -1600);
+});
+
+test("等待宿主渲染时传递目标消息与当前消息集合", async () => {
+  const navigator = loadNavigator();
+  const adapter = createAdapter(["m1"]);
+  adapter.state.onWait = (_count, options) => {
+    if (
+      options.targetMessageId === "m3" &&
+      options.previousMessageIds.includes("m1")
+    ) {
+      adapter.state.renderedIds.push("m3");
+    }
+  };
+
+  const result = await navigator.navigateToMessage({
+    branch: createBranch(),
+    target: { messageId: "m3", branchIndex: 3 },
+    adapter
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(adapter.state.waitOptions[0].minSettleMs, 120);
+});
+
+test("边界处连续加载多批消息时重置无进展计时并继续定位", async () => {
+  const navigator = loadNavigator();
+  const branch = Array.from({ length: 20 }, (_, index) => ({
+    messageId: `m${index}`,
+    branchIndex: index
+  }));
+  const adapter = createAdapter(["m19"]);
+  adapter.state.top = 0;
+  let clock = 0;
+  adapter.state.onWait = (count) => {
+    clock += 1000;
+    adapter.state.renderedIds = [count < 4 ? `m${19 - count * 4}` : "m0"];
+    return "messages";
+  };
+
+  const result = await navigator.navigateToMessage({
+    branch,
+    target: { messageId: "m0", branchIndex: 0 },
+    adapter,
+    timeoutMs: 10000,
+    now: () => clock
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(adapter.state.waitCount, 4);
+});
+
 test("没有已知锚点时按分支比例首次定位", async () => {
   const navigator = loadNavigator();
   const adapter = createAdapter();
@@ -145,7 +217,7 @@ test("没有已知锚点时按分支比例首次定位", async () => {
   assert.deepEqual(adapter.state.calls[0], ["scrollToRatio", 2 / 3]);
 });
 
-test("连续到达滚动边界后返回受控未渲染状态", async () => {
+test("滚动边界持续无加载进展后返回受控未渲染状态", async () => {
   const navigator = loadNavigator();
   const adapter = createAdapter(["m2"]);
   adapter.state.top = 0;
@@ -154,6 +226,7 @@ test("连续到达滚动边界后返回受控未渲染状态", async () => {
     target: { messageId: "m0", branchIndex: 0 },
     adapter,
     timeoutMs: 100,
+    boundaryIdleMs: 3,
     now: (() => {
       let value = 0;
       return () => (value += 1);
@@ -161,7 +234,7 @@ test("连续到达滚动边界后返回受控未渲染状态", async () => {
   });
 
   assert.equal(result.status, "not-rendered");
-  assert.equal(adapter.state.waitCount, 3);
+  assert.equal(adapter.state.waitCount, 1);
 });
 
 test("总时限到达后停止没有锚点的定位", async () => {

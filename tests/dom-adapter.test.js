@@ -122,7 +122,10 @@ test("根据消息 ID 查找完整轮次并排除扩展节点", () => {
       "ARTICLE"
     );
     assert.equal(context.adapter.findMessageElement("outside-message"), null);
-    assert.equal(context.adapter.findMessageElement("hidden-message"), null);
+    assert.equal(
+      context.adapter.findMessageElement("hidden-message"),
+      hidden
+    );
     assert.deepEqual(
       context.adapter.getRenderedMessageEntries().map((entry) => entry.messageId),
       ["message-user-1"]
@@ -205,6 +208,47 @@ test("DOM 变化会结束一次性渲染等待", async () => {
     const node = context.dom.window.document.createElement("div");
     context.dom.window.document.querySelector("main").appendChild(node);
     assert.equal(await waiting, "mutation");
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("目标等待忽略无关 DOM 变化并在目标消息挂载后结束", async () => {
+  const context = installDom();
+  try {
+    const waiting = context.adapter.waitForMessageRender({
+      targetMessageId: "message-target",
+      previousMessageIds: ["message-user-1"],
+      timeoutMs: 100
+    });
+    const unrelated = context.dom.window.document.createElement("div");
+    context.dom.window.document.querySelector("main").appendChild(unrelated);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const target = context.dom.window.document.createElement("article");
+    target.setAttribute("data-message-id", "message-target");
+    context.dom.window.document.querySelector("main").appendChild(target);
+
+    assert.equal(await waiting, "target");
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("消息变化后保留最短稳定窗口再结束等待", async () => {
+  const context = installDom();
+  try {
+    const startedAt = Date.now();
+    const waiting = context.adapter.waitForMessageRender({
+      previousMessageIds: ["message-user-1"],
+      minSettleMs: 30,
+      timeoutMs: 100
+    });
+    const message = context.dom.window.document.createElement("article");
+    message.setAttribute("data-message-id", "message-new");
+    context.dom.window.document.querySelector("main").appendChild(message);
+
+    assert.equal(await waiting, "messages");
+    assert.equal(Date.now() - startedAt >= 20, true);
   } finally {
     context.cleanup();
   }

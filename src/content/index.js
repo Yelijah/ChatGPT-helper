@@ -21,6 +21,7 @@
   const requestGate = conversationApi.createRequestGate();
   const conversationCache = new Map();
   const MAX_CONVERSATION_CACHE_SIZE = 5;
+  const NAVIGATION_TIMEOUT_MS = 30000;
   const historyOriginals = new Map();
   let sidebar = null;
   let messageOutline = null;
@@ -53,6 +54,20 @@
 
   function getEffectiveStatus() {
     return navigationStatus || directoryStatus;
+  }
+
+  function getDirectorySyncErrorMessage(error, hasCachedItems) {
+    let reason = "";
+    if (error?.name === "ConversationRequestError" && Number.isFinite(error.status)) {
+      reason = `（HTTP ${error.status}）`;
+    } else if (error?.name === "ConversationResponseError") {
+      reason = "（响应格式异常）";
+    } else if (error instanceof TypeError) {
+      reason = "（网络请求失败）";
+    }
+    return hasCachedItems
+      ? `完整目录同步失败${reason}，正在显示上次同步目录`
+      : `完整目录同步失败${reason}，当前显示页面内消息`;
   }
 
   function getBranchSignature(branch) {
@@ -396,9 +411,7 @@
       }
       directoryStatus = {
         kind: "degraded",
-        message: canonicalItems.length
-          ? "完整目录同步失败，正在显示上次同步目录"
-          : "完整目录同步失败，当前显示页面内消息"
+        message: getDirectorySyncErrorMessage(error, canonicalItems.length > 0)
       };
       refreshQuestions();
     }
@@ -416,15 +429,15 @@
       getScrollMetrics: (...args) => domAdapter.getScrollMetrics(...args),
       waitForMessageRender: (...args) => domAdapter.waitForMessageRender(...args),
       scrollByAmount(delta) {
-        programmaticScrollDeadline = Date.now() + 140;
+        programmaticScrollDeadline = Date.now() + 750;
         return domAdapter.scrollByAmount(delta);
       },
       scrollToRatio(ratio) {
-        programmaticScrollDeadline = Date.now() + 140;
+        programmaticScrollDeadline = Date.now() + 750;
         return domAdapter.scrollToRatio(ratio);
       },
       scrollToMessageElement(element) {
-        programmaticScrollDeadline = Date.now() + 140;
+        programmaticScrollDeadline = Date.now() + 750;
         return domAdapter.scrollToMessageElement(element);
       }
     };
@@ -434,7 +447,7 @@
     navigationController?.abort();
     const controller = new AbortController();
     navigationController = controller;
-    lockActive(item.id, 10000);
+    lockActive(item.id, NAVIGATION_TIMEOUT_MS);
     setActive(item.id);
     navigationStatus = { kind: "navigating", message: "正在加载并定位消息…" };
     render();
@@ -445,8 +458,10 @@
         target: item,
         adapter: createNavigationAdapter(),
         signal: controller.signal,
-        timeoutMs: 10000,
-        settleMs: 250
+        timeoutMs: NAVIGATION_TIMEOUT_MS,
+        settleMs: 250,
+        minSettleMs: 120,
+        boundaryIdleMs: 3000
       });
       if (navigationController !== controller) {
         return;

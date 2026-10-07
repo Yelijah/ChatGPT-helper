@@ -12,6 +12,7 @@
     "h4.sr-only:not([data-conversation-role='assistant'])"
   ];
   const ASSISTANT_SELECTORS = [
+    "[data-markdown-text-style='assistant-message']",
     "[data-message-author-role='assistant']",
     "[data-testid*='assistant-message']",
     "[data-testid*='conversation-turn-'][data-message-author-role='assistant']",
@@ -266,7 +267,14 @@
     );
 
     return nodes
-      .map(findTurnContainer)
+      .map((node) => {
+        // 新版回复正文与隐藏说话人标题分离，且没有 article 或旧版角色标记。
+        // 使用正文自己的消息容器，避免把一整段会话当成一条回复。
+        if (node.matches("[data-markdown-text-style='assistant-message']")) {
+          return node.closest("[data-chatgpt-selection-message-id]") || node;
+        }
+        return findTurnContainer(node);
+      })
       .filter(Boolean);
   }
 
@@ -398,7 +406,12 @@
       return null;
     }
 
+    if (element.matches("[data-markdown-text-style='assistant-message']")) {
+      return element;
+    }
+
     const selectors = [
+      "[data-markdown-text-style='assistant-message']",
       "[data-message-author-role='assistant'] .markdown",
       "[data-message-author-role='assistant'] .prose",
       "[data-message-author-role='assistant'] [class*='markdown']",
@@ -441,7 +454,9 @@
     const primary = getAssistantPrimaryCandidates(root);
     const fallback = primary.length ? [] : getAssistantFallbackCandidates(root);
     const heuristic = primary.length || fallback.length ? [] : getAssistantHeuristicCandidates(root);
-    return dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic);
+    // 不同选择器可能交错命中新旧回复；恢复页面顺序，保证最后一条回复兜底正确。
+    return dedupeElements(primary.length ? primary : fallback.length ? fallback : heuristic)
+      .sort((first, second) => first.compareDocumentPosition(second) & 4 ? -1 : 1);
   }
 
   function hasConversationContent(root) {
@@ -588,16 +603,16 @@
       return `${MESSAGE_ID_PREFIX}-${index + 1}`;
     }
 
-    if (element.dataset.chatgptHelperMessageId) {
-      return element.dataset.chatgptHelperMessageId;
-    }
-
     const sourceId =
+      element.getAttribute("data-chatgpt-selection-message-id") ||
+      element.querySelector("[data-chatgpt-selection-message-id]")?.getAttribute("data-chatgpt-selection-message-id") ||
       element.getAttribute("data-message-id") ||
       element.querySelector("[data-message-id]")?.getAttribute("data-message-id") ||
-      element.getAttribute("data-testid") ||
-      `${index + 1}`;
-    const id = `${MESSAGE_ID_PREFIX}-${String(sourceId).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+      element.getAttribute("data-testid");
+    if (!sourceId && element.dataset.chatgptHelperMessageId) {
+      return element.dataset.chatgptHelperMessageId;
+    }
+    const id = `${MESSAGE_ID_PREFIX}-${String(sourceId || index + 1).replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
     element.dataset.chatgptHelperMessageId = id;
     return id;
   }
@@ -609,12 +624,14 @@
       return [];
     }
 
+    const seenContent = new Set();
     return collectAssistantCandidateElements(root)
       .map((element, index) => {
         const contentElement = findAssistantContentElement(element);
-        if (!contentElement) {
+        if (!contentElement || seenContent.has(contentElement)) {
           return null;
         }
+        seenContent.add(contentElement);
 
         return {
           id: getStableMessageId(element, index),
@@ -656,6 +673,7 @@
     }
 
     return Array.from(contentElement.querySelectorAll("h1, h2, h3, h4, h5, h6"))
+      .filter((element) => !element.closest(".sr-only, [hidden], [aria-hidden='true']"))
       .map((element, index) => {
         return buildHeadingItem(
           element,

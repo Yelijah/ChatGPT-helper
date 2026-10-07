@@ -99,6 +99,132 @@ test("DOM 问题携带宿主消息 ID 和规范化全文", () => {
   }
 });
 
+test("新版回复识别、23 个标题展示和点击跳转贯通", () => {
+  const context = installDom();
+  let outline;
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    const turn = context.dom.window.document.createElement("div");
+    turn.innerHTML = `<h4 class="sr-only" data-conversation-role="assistant">ChatGPT 说：</h4>
+      <div><div data-chatgpt-selection-message-id="reply-standard">
+        <div data-markdown-text-style="assistant-message" class="MarkdownRoot-rZKhxa">
+          <h4 class="sr-only">隐藏提示</h4>
+          <h3 hidden>隐藏标题</h3>
+          <div aria-hidden="true"><h3>隐藏副本</h3></div>
+          ${Array.from({ length: 23 }, (_, index) => {
+            const level = index % 3 + 2;
+            return `<h${level}>章节 ${index + 1}</h${level}>`;
+          }).join("")}
+        </div>
+      </div></div>`;
+    main.appendChild(turn);
+
+    const messages = context.adapter.getAssistantMessages();
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].id, "chatgpt-helper-message-reply-standard");
+    assert.equal(messages[0].element, turn.querySelector("[data-chatgpt-selection-message-id]"));
+    assert.equal(messages[0].contentElement, turn.querySelector("[data-markdown-text-style]"));
+    assert.equal(context.adapter.getDomQuestionItems().length, 1);
+    const headings = context.adapter.extractHeadings(messages[0].contentElement, messages[0].id);
+    assert.equal(headings.length, 23);
+    assert.deepEqual(headings.slice(0, 3).map(({ level }) => level), [2, 3, 4]);
+    assert.equal(headings.every(({ text }) => text.startsWith("章节 ")), true);
+
+    outline = loadScript("src/content/message-outline.js").messageOutline.mount(
+      context.dom.window.document.body,
+      { onSelect: (heading) => context.adapter.scrollToHeading(heading.id) }
+    );
+    outline.render(messages[0], headings);
+    assert.equal(outline.root.dataset.visible, "true");
+    assert.equal(outline.list.children.length, 23);
+    assert.equal(outline.rail.children.length > 0, true);
+    headings[0].element.getBoundingClientRect = () => ({ top: 500, bottom: 540, height: 40 });
+    outline.list.children[0].click();
+    assert.equal(context.scroll.scrollTop, 704);
+  } finally {
+    outline?.destroy();
+    context.cleanup();
+  }
+});
+
+test("新版与旧版回复混用时每条回复只收录一次", () => {
+  const context = installDom();
+  try {
+    context.dom.window.document.querySelector("main").innerHTML = `
+      <article data-message-id="legacy">
+        <div data-message-author-role="assistant"><div class="markdown"><h2>旧版标题</h2></div></div>
+      </article>
+      <div><h4 class="sr-only" data-conversation-role="assistant">ChatGPT 说：</h4>
+        <div data-chatgpt-selection-message-id="modern">
+          <div data-markdown-text-style="assistant-message"><h2>新版标题</h2></div>
+        </div>
+      </div>
+      <article data-message-id="overlap">
+        <div data-message-author-role="assistant" data-chatgpt-selection-message-id="overlap">
+          <div class="markdown" data-markdown-text-style="assistant-message"><h2>双标记标题</h2></div>
+        </div>
+      </article>`;
+    const messages = context.adapter.getAssistantMessages();
+    assert.equal(messages.length, 3);
+    assert.equal(new Set(messages.map(({ id }) => id)).size, 3);
+    assert.deepEqual(messages.flatMap((message) =>
+      context.adapter.extractHeadings(message.contentElement, message.id).map(({ text }) => text)
+    ), ["旧版标题", "新版标题", "双标记标题"]);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("新版正文无需消息包装节点，重挂载和节点复用仍使用宿主消息 ID", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.innerHTML = `<div data-markdown-text-style="assistant-message"><h2>无包装标题</h2></div>`;
+    const direct = context.adapter.getAssistantMessages()[0];
+    assert.equal(direct.contentElement, main.firstElementChild);
+    assert.equal(direct.element, direct.contentElement);
+
+    const html = `<div data-chatgpt-selection-message-id="stable">
+      <div data-markdown-text-style="assistant-message"><h2>稳定标题</h2></div>
+    </div>`;
+    main.innerHTML = html;
+    const first = context.adapter.getAssistantMessages()[0];
+    const firstHeading = context.adapter.extractHeadings(first.contentElement, first.id)[0];
+    main.innerHTML = `<div data-markdown-text-style="assistant-message"><h2>前序回复</h2></div>${html}`;
+    const remounted = context.adapter.getAssistantMessages()[1];
+    assert.equal(remounted.id, first.id);
+    assert.equal(context.adapter.extractHeadings(remounted.contentElement, remounted.id)[0].id, firstHeading.id);
+    remounted.element.setAttribute("data-chatgpt-selection-message-id", "reused");
+    assert.equal(context.adapter.getAssistantMessages()[1].id, "chatgpt-helper-message-reused");
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("新版回复流式添加标题会刷新大纲", async () => {
+  const context = installDom();
+  let stop;
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.innerHTML = `<div data-chatgpt-selection-message-id="streaming">
+      <div data-markdown-text-style="assistant-message"></div>
+    </div>`;
+    const content = main.querySelector("[data-markdown-text-style]");
+    const changed = new Promise((resolve) => {
+      stop = context.adapter.observeAssistantMessages(resolve);
+    });
+    const heading = context.dom.window.document.createElement("h2");
+    heading.textContent = "流式标题";
+    content.appendChild(heading);
+    await changed;
+    const message = context.adapter.getAssistantMessages()[0];
+    assert.deepEqual(context.adapter.extractHeadings(message.contentElement, message.id).map(({ text }) => text), ["流式标题"]);
+  } finally {
+    stop?.();
+    context.cleanup();
+  }
+});
+
 test("项目会话路径即使使用新版消息 DOM 也识别为会话", () => {
   const context = installDom();
   try {

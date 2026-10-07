@@ -289,7 +289,19 @@
       matchedIds.add(match.id);
     });
 
-    const unmatchedTail = canonical.slice(Math.max(canonical.length - 4, 0));
+    // 历史消息会随着滚动重新挂载，而且新版 DOM 没有消息 ID。
+    // 在完整目录中绑定已渲染消息，保持接口提供的原始顺序；每个目录项
+    // 只匹配一次，以保留用户连续发送相同内容的独立消息。
+    const byFingerprint = new Map();
+    canonical.forEach((item) => {
+      const fingerprint = item.textFingerprint || createTextFingerprint(item.fullText);
+      if (!fingerprint) {
+        return;
+      }
+      const matches = byFingerprint.get(fingerprint) || [];
+      matches.push(item);
+      byFingerprint.set(fingerprint, matches);
+    });
     const pending = rendered.filter((domItem) => {
       if (domItem.messageId && byMessageId.has(domItem.messageId)) {
         return false;
@@ -297,15 +309,9 @@
 
       const normalizedDomText = normalizeMessageText(domItem.fullText);
       const domFingerprint = createTextFingerprint(normalizedDomText);
-      const textMatch = unmatchedTail.find((item) => {
-        const itemFingerprint =
-          item.textFingerprint || createTextFingerprint(item.fullText);
-        return (
-          !matchedIds.has(item.id) &&
-          itemFingerprint &&
-          itemFingerprint === domFingerprint
-        );
-      });
+      const textMatch = (byFingerprint.get(domFingerprint) || []).find(
+        (item) => !matchedIds.has(item.id)
+      );
 
       if (textMatch) {
         textMatch.element = domItem.element || null;

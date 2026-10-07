@@ -46,6 +46,36 @@
     return nearest;
   }
 
+  function chooseNearestAnchorWithQuestions(branch, target, renderedEntries, questions) {
+    const direct = chooseNearestAnchor(branch, target, renderedEntries);
+    if (direct) {
+      return direct;
+    }
+    if (!Array.isArray(questions)) {
+      return null;
+    }
+
+    const byFingerprint = new Map(
+      questions
+        .filter((item) => item?.textFingerprint && Number.isFinite(item.branchIndex))
+        .map((item) => [item.textFingerprint, item])
+    );
+    let nearest = null;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    (Array.isArray(renderedEntries) ? renderedEntries : []).forEach((rendered) => {
+      const question = byFingerprint.get(rendered?.textFingerprint);
+      if (!question) {
+        return;
+      }
+      const distance = Math.abs(question.branchIndex - target.branchIndex);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = { ...rendered, branchIndex: question.branchIndex };
+      }
+    });
+    return nearest;
+  }
+
   function calculateScrollDelta(target, anchor, metrics) {
     const direction = target.branchIndex < anchor.branchIndex ? -1 : 1;
     const branchDistance = Math.abs(target.branchIndex - anchor.branchIndex);
@@ -56,7 +86,7 @@
 
   function getRenderedMessageSignature(entries) {
     return (Array.isArray(entries) ? entries : [])
-      .map((entry) => entry?.messageId)
+      .map((entry) => entry?.messageId || entry?.textFingerprint || entry?.fullText)
       .filter(Boolean)
       .map(String)
       .sort()
@@ -83,9 +113,9 @@
 
     throwIfAborted(signal);
     const directElement =
-      target.element ||
-      (target.messageId
-        ? adapter.findMessageElement(target.messageId)
+      (target.element?.isConnected === false ? null : target.element) ||
+      (target.messageId || target.fullText
+        ? adapter.findMessageElement(target.messageId, target)
         : null);
 
     if (directElement) {
@@ -105,7 +135,12 @@
       throwIfAborted(signal);
       const renderedEntries = adapter.getRenderedMessageEntries();
       const beforeMessageSignature = getRenderedMessageSignature(renderedEntries);
-      const anchor = chooseNearestAnchor(branch, target, renderedEntries);
+      const anchor = chooseNearestAnchorWithQuestions(
+        branch,
+        target,
+        renderedEntries,
+        options.questions
+      );
       const before = adapter.getScrollMetrics();
 
       if (anchor) {
@@ -123,11 +158,13 @@
         timeoutMs: Math.min(settleMs, remaining),
         minSettleMs,
         targetMessageId: target.messageId,
-        previousMessageIds: renderedEntries.map((entry) => entry.messageId)
+        target,
+        previousMessageIds: renderedEntries.map((entry) => entry.messageId),
+        previousRenderedSignature: beforeMessageSignature
       });
       throwIfAborted(signal);
 
-      const element = adapter.findMessageElement(target.messageId);
+      const element = adapter.findMessageElement(target.messageId, target);
       if (element) {
         adapter.scrollToMessageElement(element);
         return { status: "found", element };

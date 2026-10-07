@@ -99,6 +99,224 @@ test("DOM 问题携带宿主消息 ID 和规范化全文", () => {
   }
 });
 
+test("项目会话路径即使使用新版消息 DOM 也识别为会话", () => {
+  const context = installDom();
+  try {
+    context.dom.window.history.replaceState(
+      {},
+      "",
+      "/g/g-p-project-name/c/conversation-1"
+    );
+    context.dom.window.document.querySelector("main").replaceChildren();
+
+    assert.equal(context.adapter.isConversationRoute(), true);
+    assert.deepEqual(context.adapter.getDomQuestionItems(), []);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("新版隐藏说话人标题可作为问题元素并支持全文定位", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.replaceChildren();
+    const turn = context.dom.window.document.createElement("div");
+    const marker = context.dom.window.document.createElement("h4");
+    marker.className = "sr-only";
+    marker.textContent = "你说：";
+    const text = context.dom.window.document.createElement("div");
+    text.textContent = "历史问题全文";
+    turn.append(marker, text);
+    Object.defineProperty(turn, "innerText", {
+      configurable: true,
+      value: "你说：历史问题全文"
+    });
+    turn.getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 260,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 160
+    });
+    main.appendChild(turn);
+
+    const items = context.adapter.getDomQuestionItems();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].fullText, "历史问题全文");
+    assert.equal(
+      context.adapter.findMessageElement("api-message", {
+        fullText: "历史问题全文"
+      }),
+      turn
+    );
+    assert.equal(context.adapter.getRenderedMessageEntries().length, 1);
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("Codex 消息标题与 data-user-message-bubble 分离时只返回当前气泡", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.replaceChildren();
+    const marker = context.dom.window.document.createElement("h4");
+    marker.className = "sr-only m-0 select-none";
+    marker.textContent = "你说：";
+    const bubble = context.dom.window.document.createElement("div");
+    bubble.setAttribute("data-user-message-bubble", "true");
+    Object.defineProperty(bubble, "innerText", {
+      configurable: true,
+      value: "多租户定时任务调度"
+    });
+    bubble.getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 180,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 80
+    });
+    const marker2 = context.dom.window.document.createElement("h4");
+    marker2.className = "sr-only m-0 select-none";
+    marker2.textContent = "你说：";
+    const bubble2 = context.dom.window.document.createElement("div");
+    bubble2.setAttribute("data-user-message-bubble", "true");
+    Object.defineProperty(bubble2, "innerText", {
+      configurable: true,
+      value: "第二个问题"
+    });
+    bubble2.getBoundingClientRect = bubble.getBoundingClientRect;
+    const assistantMarker = context.dom.window.document.createElement("h4");
+    assistantMarker.className = "sr-only m-0 select-none";
+    assistantMarker.dataset.conversationRole = "assistant";
+    assistantMarker.textContent = "ChatGPT said:";
+    main.append(marker, bubble, assistantMarker, marker2, bubble2);
+
+    const items = context.adapter.getDomQuestionItems();
+    const item = items[0];
+    assert.equal(item.element, bubble);
+    assert.equal(item.fullText, "多租户定时任务调度");
+    assert.equal(items[1].element, bubble2);
+    assert.equal(
+      context.adapter.findMessageElement("api-message", { fullText: item.fullText }),
+      bubble
+    );
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("新版无障碍标题嵌套在零高度包装节点时仍定位到消息块", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.replaceChildren();
+    const turn = context.dom.window.document.createElement("div");
+    const wrapper = context.dom.window.document.createElement("div");
+    const marker = context.dom.window.document.createElement("h4");
+    marker.className = "sr-only";
+    marker.textContent = "你说：";
+    wrapper.appendChild(marker);
+    turn.append(wrapper, context.dom.window.document.createTextNode("多租户定时任务调度"));
+    Object.defineProperty(turn, "innerText", {
+      configurable: true,
+      value: "你说：多租户定时任务调度"
+    });
+    turn.getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 260,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 160
+    });
+    main.appendChild(turn);
+
+    const item = context.adapter.getDomQuestionItems()[0];
+    assert.equal(item.element, turn);
+    assert.equal(item.fullText, "多租户定时任务调度");
+    assert.equal(
+      context.adapter.findMessageElement(null, { fullText: item.fullText }),
+      turn
+    );
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("正文换行被新版 DOM 合并为空格时仍可按全文定位", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.replaceChildren();
+    const turn = context.dom.window.document.createElement("div");
+    const marker = context.dom.window.document.createElement("h4");
+    marker.className = "sr-only";
+    marker.textContent = "你说：";
+    turn.append(marker);
+    Object.defineProperty(turn, "innerText", {
+      configurable: true,
+      value: "你说：第一行 第二行"
+    });
+    turn.getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 260,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 160
+    });
+    main.appendChild(turn);
+
+    assert.equal(
+      context.adapter.findMessageElement(null, {
+        fullText: "第一行\n第二行"
+      }),
+      turn
+    );
+  } finally {
+    context.cleanup();
+  }
+});
+
+test("新版无障碍标题位于带消息 ID 的轮次内时保留宿主消息 ID", () => {
+  const context = installDom();
+  try {
+    const main = context.dom.window.document.querySelector("main");
+    main.replaceChildren();
+    const article = context.dom.window.document.createElement("article");
+    article.setAttribute("data-message-id", "host-message");
+    const marker = context.dom.window.document.createElement("h4");
+    marker.className = "sr-only";
+    marker.textContent = "你说：";
+    const body = context.dom.window.document.createElement("div");
+    body.textContent = "保留消息 ID";
+    article.append(marker, body);
+    Object.defineProperty(article, "innerText", {
+      configurable: true,
+      value: "你说：保留消息 ID"
+    });
+    article.getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 260,
+      left: 100,
+      right: 700,
+      width: 600,
+      height: 160
+    });
+    main.appendChild(article);
+
+    const item = context.adapter.getDomQuestionItems()[0];
+    assert.equal(item.messageId, "host-message");
+    assert.equal(item.element, article);
+  } finally {
+    context.cleanup();
+  }
+});
+
 test("根据消息 ID 查找完整轮次并排除扩展节点", () => {
   const context = installDom();
   try {

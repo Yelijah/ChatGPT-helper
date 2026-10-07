@@ -34,6 +34,10 @@ test("从普通和项目会话路径提取会话 ID", () => {
     api.getConversationId("/projects/project-1/c/conversation-2"),
     "conversation-2"
   );
+  assert.equal(
+    api.getConversationId("/g/g-p-project-name/c/conversation-3"),
+    "conversation-3"
+  );
   assert.equal(api.getConversationId("/projects/project-1"), null);
   assert.equal(api.getConversationId("/c/%E0%A4%A"), null);
 });
@@ -667,7 +671,7 @@ test("通过消息 ID 将 DOM 元素绑定到权威问题且不修改输入", ()
   assert.equal(canonical[0].element, null);
 });
 
-test("没有消息 ID 时只在末尾近邻中按规范化全文匹配", () => {
+test("没有消息 ID 时按规范化全文匹配", () => {
   const api = loadApi();
   const element = { marker: "pending-rendered" };
   const canonical = Array.from({ length: 6 }, (_, index) => ({
@@ -690,6 +694,47 @@ test("没有消息 ID 时只在末尾近邻中按规范化全文匹配", () => {
   const merged = api.mergeQuestionItems(canonical, domItems);
   assert.equal(merged.length, 6);
   assert.equal(merged[5].element, element);
+});
+
+test("滚动加载旧消息时绑定到原目录位置，不把旧问题追加到末尾", () => {
+  const api = loadApi();
+  const canonical = Array.from({ length: 12 }, (_, index) => ({
+    id: `question-m${index}`,
+    messageId: `m${index}`,
+    fullText: `问题 ${index}`,
+    element: null
+  }));
+  const rendered = [0, 4, 7, 8, 11].map((index) => ({
+    id: `dom-${index}`,
+    messageId: null,
+    fullText: `问题 ${index}`,
+    element: { index },
+    source: "dom"
+  }));
+
+  const merged = api.mergeQuestionItems(canonical, rendered);
+  assert.deepEqual(merged.map((item) => item.id), canonical.map((item) => item.id));
+  rendered.forEach((item) => assert.equal(merged[item.element.index].element, item.element));
+  assert.ok(canonical.every((item) => item.element === null));
+});
+
+test("不同消息重复同一问题时保留两条并分别绑定 DOM 元素", () => {
+  const api = loadApi();
+  const canonical = Array.from({ length: 12 }, (_, index) => ({
+    id: `question-m${index}`,
+    messageId: `m${index}`,
+    fullText: index === 1 || index === 2 ? "重复提问" : `问题 ${index}`,
+    element: null
+  }));
+  const rendered = [
+    { id: "dom-first", messageId: null, fullText: "重复提问", element: { index: 1 } },
+    { id: "dom-second", messageId: null, fullText: "重复提问", element: { index: 2 } }
+  ];
+
+  const merged = api.mergeQuestionItems(canonical, rendered);
+  assert.equal(merged.length, 12);
+  assert.equal(merged[1].element, rendered[0].element);
+  assert.equal(merged[2].element, rendered[1].element);
 });
 
 test("相同标题但全文不同的问题保持独立", () => {

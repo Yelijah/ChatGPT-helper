@@ -79,6 +79,43 @@ test("目标已经渲染时直接定位", async () => {
   assert.deepEqual(adapter.state.calls, [["scrollToMessageElement", "m1"]]);
 });
 
+test("新版 DOM 没有消息 ID 时把目标全文传给适配器定位", async () => {
+  const navigator = loadNavigator();
+  const adapter = createAdapter();
+  let receivedTarget = null;
+  adapter.findMessageElement = (_id, target) => {
+    receivedTarget = target;
+    return target?.fullText === "历史问题" ? { id: "text-match" } : null;
+  };
+
+  const result = await navigator.navigateToMessage({
+    branch: createBranch(),
+    target: { messageId: "m1", branchIndex: 1, fullText: "历史问题" },
+    adapter
+  });
+
+  assert.equal(result.status, "found");
+  assert.equal(receivedTarget.fullText, "历史问题");
+  assert.deepEqual(adapter.state.calls, [["scrollToMessageElement", "text-match"]]);
+});
+
+test("新版 DOM 的待定位项没有消息 ID 时也能直接按全文定位", async () => {
+  const navigator = loadNavigator();
+  const adapter = createAdapter();
+  adapter.findMessageElement = (_id, target) => {
+    return target?.fullText === "历史问题" ? { id: "text-match" } : null;
+  };
+
+  const result = await navigator.navigateToMessage({
+    branch: createBranch(),
+    target: { messageId: null, branchIndex: null, fullText: "历史问题" },
+    adapter
+  });
+
+  assert.equal(result.status, "found");
+  assert.deepEqual(adapter.state.calls, [["scrollToMessageElement", "text-match"]]);
+});
+
 test("待同步项携带现成元素时无需消息 ID", async () => {
   const navigator = loadNavigator();
   const adapter = createAdapter();

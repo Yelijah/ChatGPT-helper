@@ -269,6 +269,34 @@ test("旧会话响应后返回时不会覆盖新会话", async () => {
   }
 });
 
+test("项目路由只改写 slug 时不会中止同一会话请求", async () => {
+  const request = deferred();
+  const context = installApp({
+    url: "https://chatgpt.com/g/old-project/c/shared-conversation",
+    loadConversation() {
+      return request.promise;
+    }
+  });
+
+  try {
+    context.dom.window.history.replaceState(
+      {},
+      "",
+      "/g/new-project/c/shared-conversation"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 140));
+
+    assert.equal(context.loadCalls.length, 1);
+    assert.equal(context.loadCalls[0].requestOptions.signal.aborted, false);
+
+    request.resolve(makeResult("shared-conversation"));
+    await flush();
+    assert.equal(context.app.getState().items[0].messageId, "shared-conversation");
+  } finally {
+    context.cleanup();
+  }
+});
+
 test("跨路由相同文本的新 DOM 节点仍可作为降级目录", async () => {
   let loadCount = 0;
   const context = installApp({

@@ -7,7 +7,9 @@
     "[data-message-author-role='user']",
     "[data-testid*='user-message']",
     "[data-testid*='conversation-turn-'][data-message-author-role='user']",
-    "article [data-message-author-role='user']"
+    "article [data-message-author-role='user']",
+    "[data-user-message-bubble]",
+    "h4.sr-only:not([data-conversation-role='assistant'])"
   ];
   const ASSISTANT_SELECTORS = [
     "[data-message-author-role='assistant']",
@@ -17,6 +19,7 @@
   ];
   const KNOWN_CONVERSATION_ROUTE_PATTERNS = [
     /^\/c\/[^/]+/i,
+    /^\/g\/[^/]+\/c\/[^/]+/i,
     /^\/share\/[^/]+/i,
     /^\/projects?\/[^/]+(?:\/c\/[^/]+)?/i
   ];
@@ -85,11 +88,94 @@
       return null;
     }
 
-    return (
+    const knownContainer = (
       node.closest("article") ||
       node.closest("[data-testid^='conversation-turn-']") ||
       node.closest("[data-message-id]") ||
       node
+    );
+
+    // ChatGPT 的新版项目会话使用隐藏的“你说：”标题作为用户消息标记，
+    // 但不再提供 data-message-id。沿父级向上寻找第一个真正有内容和布局的
+    // 消息块，避免把只包裹无障碍标题的零高度节点当成滚动目标。
+    if (
+      node.matches("h4.sr-only") &&
+      /^(你说|您说|你问|用户|You said|You)\s*[:：]?$/i.test(
+        node.textContent?.trim() || ""
+      )
+    ) {
+      // Codex 的新版会话把无障碍标题和正文气泡作为同一消息块的兄弟节点，
+      // 正文气泡带有稳定的 data-user-message-bubble 标记，但没有消息 ID。
+      // 优先返回气泡本身，避免把整段会话容器误当成一个问题。
+      let sibling = node.nextElementSibling;
+      for (let depth = 0; sibling && depth < 4; depth += 1) {
+        const bubble = sibling.matches?.("[data-user-message-bubble]")
+          ? sibling
+          : sibling.querySelector?.("[data-user-message-bubble]");
+        if (bubble instanceof HTMLElement && isVisibleConversationBlock(bubble)) {
+          return bubble;
+        }
+        if (sibling.matches?.("h4.sr-only")) {
+          break;
+        }
+        sibling = sibling.nextElementSibling;
+      }
+
+      if (
+        knownContainer !== node &&
+        knownContainer.matches?.("article, [data-testid^='conversation-turn-'], [data-message-id]")
+      ) {
+        return knownContainer;
+      }
+
+      let fallbackCurrent = node.parentElement || knownContainer;
+      let fallback = fallbackCurrent || knownContainer;
+      for (let depth = 0; fallbackCurrent && depth < 6; depth += 1) {
+        fallback = fallbackCurrent;
+        const text = (fallbackCurrent.innerText || fallbackCurrent.textContent || "")
+          .replace(/^(你说|您说|你问|用户|You said|You)\s*[:：]?\s*/i, "")
+          .trim();
+        const rect = fallbackCurrent.getBoundingClientRect?.();
+        if (
+          text &&
+          rect &&
+          rect.height > 24 &&
+          rect.width > 120
+        ) {
+          return fallbackCurrent;
+        }
+        fallbackCurrent = fallbackCurrent.parentElement;
+      }
+      return fallback || knownContainer;
+    }
+
+    return knownContainer;
+  }
+
+  function createTextFingerprint(rawText) {
+    const fingerprint = global[NAMESPACE]?.conversationApi?.createTextFingerprint;
+    return typeof fingerprint === "function" ? fingerprint(rawText) : null;
+  }
+
+  function stripTrailingMessageControls(rawText) {
+    return normalizeFullText(rawText)
+      .replace(
+        /(?:\n|\s)+(编辑消息|Edit message|复制|Copy|赞|踩|重新生成|Regenerate)(?:(?:\n|\s)+(编辑消息|Edit message|复制|Copy|赞|踩|重新生成|Regenerate))*$/i,
+        ""
+      )
+      .trim();
+  }
+
+  function sameQuestionText(left, right) {
+    const leftText = stripTrailingMessageControls(left);
+    const rightText = stripTrailingMessageControls(right);
+    if (!leftText || !rightText) {
+      return false;
+    }
+    return (
+      leftText === rightText ||
+      leftText.replace(/\s+/g, " ") === rightText.replace(/\s+/g, " ") ||
+      createTextFingerprint(leftText) === createTextFingerprint(rightText)
     );
   }
 
@@ -167,6 +253,8 @@
     );
 
     return nodes
+      .filter((node) => !node.matches("h4.sr-only") ||
+        /^(你说|您说|你问|用户|You said|You)\s*[:：]?$/i.test(node.textContent?.trim() || ""))
       .map(findTurnContainer)
       .filter(Boolean);
   }
@@ -258,6 +346,7 @@
     }
 
     const contentSelectors = [
+      "[data-user-message-bubble]",
       "[data-message-author-role='user'] .whitespace-pre-wrap",
       "[data-message-author-role='user'] [class*='whitespace-pre-wrap']",
       "[data-message-author-role='user'] [data-testid='user-message']",
@@ -283,7 +372,10 @@
         .find((text) => text && !/^(你说|您说|你问|用户|You said|You)\s*[:：]?$/i.test(text));
 
       if (matched) {
-        return matched;
+        return matched.replace(
+          /^(你说|您说|你问|用户|You said|You)\s*[:：]\s*/i,
+          ""
+        );
       }
     }
 
@@ -294,7 +386,10 @@
       .filter((line) => !/^(你说|您说|你问|用户|You said|You)\s*[:：]?$/i.test(line))
       .filter((line) => !/^(编辑消息|Edit message|复制|Copy|赞|踩|重新生成|Regenerate)$/i.test(line));
 
-    return cleanedLines[0] || "";
+    return cleanedLines.join("\n").replace(
+      /^(你说|您说|你问|用户|You said|You)\s*[:：]\s*/i,
+      ""
+    );
   }
 
   // 查找 AI 回复中承载 Markdown 内容的元素。
@@ -396,8 +491,8 @@
     return getDomQuestionItems();
   }
 
-  function findMessageElement(messageId) {
-    if (!messageId) {
+  function findMessageElement(messageId, target = null) {
+    if (!messageId && !target) {
       return null;
     }
 
@@ -406,11 +501,30 @@
       return null;
     }
 
-    const matched = root.querySelector(
-      `[data-message-id='${CSS.escape(String(messageId))}']`
-    );
+    const matched = messageId
+      ? root.querySelector(
+          `[data-message-id='${CSS.escape(String(messageId))}']`
+        )
+      : null;
     const element = matched instanceof HTMLElement ? findTurnContainer(matched) : null;
-    return element?.isConnected ? element : null;
+    if (element?.isConnected) {
+      return element;
+    }
+
+    const targetFingerprint =
+      target?.textFingerprint || createTextFingerprint(target?.fullText);
+    if (!targetFingerprint && !target?.fullText) {
+      return null;
+    }
+
+    return (
+      getDomQuestionItems().find((item) => {
+        return (
+          (targetFingerprint && createTextFingerprint(item.fullText) === targetFingerprint) ||
+          sameQuestionText(item.fullText, target?.fullText)
+        );
+      })?.element || null
+    );
   }
 
   function getRenderedMessageEntries() {
@@ -443,6 +557,26 @@
 
       seen.add(messageId);
       entries.push({ messageId, element });
+    });
+
+    // 新版项目会话没有消息 ID，使用用户消息候选及全文指纹作为渲染锚点。
+    collectCandidateElements(root).forEach((element) => {
+      if (!(element instanceof HTMLElement) || !isVisibleConversationBlock(element)) {
+        return;
+      }
+      const messageId = getSourceMessageId(element);
+      if (messageId && seen.has(messageId)) {
+        return;
+      }
+      const fullText = normalizeFullText(extractQuestionText(element));
+      const textFingerprint = createTextFingerprint(fullText);
+      if (!fullText || (!messageId && !textFingerprint)) {
+        return;
+      }
+      if (messageId) {
+        seen.add(messageId);
+      }
+      entries.push({ messageId: messageId || null, fullText, textFingerprint, element });
     });
 
     return entries;
@@ -545,7 +679,7 @@
   }
 
   function findScrollContainer(element) {
-    let current = element?.parentElement || null;
+    let current = element || null;
 
     while (current && current !== document.body) {
       if (isScrollable(current)) {
@@ -559,18 +693,46 @@
     return fallback instanceof HTMLElement ? fallback : null;
   }
 
+  function getScrollBounds(container) {
+    if (!(container instanceof HTMLElement)) {
+      return { min: 0, max: 0, reverse: false };
+    }
+
+    const range = Math.max(container.scrollHeight - container.clientHeight, 0);
+    // ChatGPT 的会话列表使用 column-reverse，浏览器在该布局下把滚动范围
+    // 暴露为 [-range, 0]，而普通容器的范围是 [0, range]。
+    const reverse =
+      container.scrollTop < 0 ||
+      window.getComputedStyle(container).flexDirection === "column-reverse";
+    return reverse
+      ? { min: -range, max: 0, reverse: true }
+      : { min: 0, max: range, reverse: false };
+  }
+
+  function clampScrollTop(value, bounds) {
+    return Math.min(Math.max(Number(value) || 0, bounds.min), bounds.max);
+  }
+
   function getScrollContainer() {
     const root = getConversationRoot();
+    // 新版布局把滚动层放在 main 内部；先从消息向上查找，避免
+    // findScrollContainer(main) 提前回退到不可滚动的 documentElement。
+    const firstQuestion = getQuestionItems()[0];
+    if (firstQuestion?.element) {
+      const container = findScrollContainer(firstQuestion.element);
+      if (container && container !== document.scrollingElement) {
+        return container;
+      }
+    }
     if (root instanceof HTMLElement) {
+      const thread = root.querySelector(".thread-scroll-container");
+      if (thread instanceof HTMLElement) {
+        return thread;
+      }
       const container = findScrollContainer(root);
       if (container) {
         return container;
       }
-    }
-
-    const firstQuestion = getQuestionItems()[0];
-    if (firstQuestion?.element) {
-      return findScrollContainer(firstQuestion.element);
     }
 
     const fallback = document.scrollingElement;
@@ -583,9 +745,12 @@
       return { top: 0, maxTop: 0, clientHeight: 0 };
     }
 
+    const bounds = getScrollBounds(container);
+    const rawTop = clampScrollTop(container.scrollTop, bounds);
     return {
-      top: Number(container.scrollTop) || 0,
-      maxTop: Math.max(container.scrollHeight - container.clientHeight, 0),
+      // 对导航器统一成从旧到新的正向坐标，屏蔽反向滚动实现细节。
+      top: bounds.reverse ? rawTop - bounds.min : rawTop,
+      maxTop: bounds.reverse ? bounds.max - bounds.min : bounds.max,
       clientHeight: Number(container.clientHeight) || 0
     };
   }
@@ -596,10 +761,10 @@
       return false;
     }
 
-    const metrics = getScrollMetrics();
-    const nextTop = Math.min(
-      Math.max(metrics.top + (Number(delta) || 0), 0),
-      metrics.maxTop
+    const bounds = getScrollBounds(container);
+    const nextTop = clampScrollTop(
+      (Number(container.scrollTop) || 0) + (Number(delta) || 0),
+      bounds
     );
     container.scrollTo({ top: nextTop, behavior: "auto" });
     return true;
@@ -612,10 +777,9 @@
     }
 
     const safeRatio = Math.min(Math.max(Number(ratio) || 0, 0), 1);
-    container.scrollTo({
-      top: getScrollMetrics().maxTop * safeRatio,
-      behavior: "auto"
-    });
+    const bounds = getScrollBounds(container);
+    const nextTop = bounds.min + (bounds.max - bounds.min) * safeRatio;
+    container.scrollTo({ top: nextTop, behavior: "auto" });
     return true;
   }
 
@@ -630,9 +794,14 @@
     const targetMessageId = options.targetMessageId
       ? String(options.targetMessageId)
       : null;
+    const target = options.target || null;
     const previousMessageIds = Array.isArray(options.previousMessageIds)
       ? options.previousMessageIds.map(String).sort().join("|")
       : null;
+    const previousRenderedSignature =
+      typeof options.previousRenderedSignature === "string"
+        ? options.previousRenderedSignature
+        : null;
 
     return new Promise((resolve, reject) => {
       if (signal?.aborted) {
@@ -650,13 +819,19 @@
       let pendingReason = null;
       const observer = new MutationObserver(() => {
         if (targetMessageId) {
-          const target = root.querySelector(
-            `[data-message-id='${CSS.escape(targetMessageId)}']`
-          );
-          if (target) {
+          const targetElement = findMessageElement(targetMessageId, target);
+          if (targetElement) {
             finishAfterMinimum("target");
             return;
           }
+        }
+
+        if (previousRenderedSignature !== null) {
+          const nextSignature = getRenderedMessageSignature();
+          if (nextSignature !== previousRenderedSignature) {
+            finishAfterMinimum("messages");
+          }
+          return;
         }
 
         if (previousMessageIds !== null) {
@@ -728,6 +903,15 @@
       observer.observe(root, { childList: true, subtree: true });
       signal?.addEventListener("abort", onAbort, { once: true });
       timeoutId = global.setTimeout(() => finish("timeout"), timeoutMs);
+
+      function getRenderedMessageSignature() {
+        return getRenderedMessageEntries()
+          .map((entry) => entry.messageId || entry.textFingerprint || entry.fullText)
+          .filter(Boolean)
+          .map(String)
+          .sort()
+          .join("|");
+      }
     });
   }
 
@@ -745,8 +929,9 @@
       const targetRect = target.getBoundingClientRect();
       const targetTop = targetRect.top - containerRect.top + container.scrollTop - topOffset;
 
+      const bounds = getScrollBounds(container);
       container.scrollTo({
-        top: Math.max(targetTop, 0),
+        top: clampScrollTop(targetTop, bounds),
         behavior
       });
       return true;
@@ -794,8 +979,9 @@
         stableCount = 0;
 
         if (container && container !== document.body && container !== document.documentElement) {
+          const bounds = getScrollBounds(container);
           container.scrollTo({
-            top: Math.max(container.scrollTop + delta, 0),
+            top: clampScrollTop(container.scrollTop + delta, bounds),
             behavior: "auto"
           });
         } else {

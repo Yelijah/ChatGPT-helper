@@ -76,6 +76,10 @@
       .join("|");
   }
 
+  function getRouteConversationId(pathname) {
+    return conversationApi.getConversationId(pathname) || null;
+  }
+
   function cancelNavigation() {
     navigationController?.abort();
     navigationController = null;
@@ -367,7 +371,7 @@
     }
 
     const requestPath = window.location.pathname;
-    const conversationId = conversationApi.getConversationId(requestPath);
+    const conversationId = getRouteConversationId(requestPath);
     if (!conversationId) {
       requestGate.abort();
       setActiveBranch([]);
@@ -395,7 +399,7 @@
       if (
         destroyed ||
         !requestGate.isCurrent(ticket.generation) ||
-        window.location.pathname !== requestPath
+        getRouteConversationId(window.location.pathname) !== conversationId
       ) {
         return;
       }
@@ -456,6 +460,7 @@
       const result = await messageNavigator.navigateToMessage({
         branch: activeBranch,
         target: item,
+        questions: items,
         adapter: createNavigationAdapter(),
         signal: controller.signal,
         timeoutMs: NAVIGATION_TIMEOUT_MS,
@@ -538,10 +543,26 @@
   }
 
   function handleRouteChange() {
-    if (window.location.pathname === currentPath || destroyed) {
+    const nextPath = window.location.pathname;
+    if (nextPath === currentPath || destroyed) {
       return;
     }
+
+    const previousConversationId = getRouteConversationId(currentPath);
+    const nextConversationId = getRouteConversationId(nextPath);
     currentPath = window.location.pathname;
+
+    // ChatGPT 项目页会在初始化期间改写 /g/<slug>/c/<id> 的 slug。
+    // 这不是会话切换；如果中止当前请求，会在 Network 中留下
+    // net::ERR_ABORTED，并清空本来已经可用的目录。
+    if (
+      previousConversationId &&
+      nextConversationId &&
+      previousConversationId === nextConversationId
+    ) {
+      return;
+    }
+
     routeDomBaselineElements = new WeakSet(
       domItems
         .map((item) => item.element)
@@ -557,7 +578,7 @@
     window.clearTimeout(routeTimer);
     messageOutline?.destroy();
     messageOutline = null;
-    directoryStatus = conversationApi.getConversationId(currentPath)
+    directoryStatus = nextConversationId
       ? { kind: "loading", message: "正在同步完整目录…" }
       : { kind: "ready", message: "" };
     refreshQuestions();
